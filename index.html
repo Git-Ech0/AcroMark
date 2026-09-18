@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NovaPDF — Modern PDF Workspace</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: { 50: '#eef2ff', 500: '#6366f1', 600: '#4f46e5', 700: '#4338ca' }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- PDF.js, Fabric.js, PDF-Lib & Lucide Icons -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
+  <script src="https://unpkg.com/pdf-lib@1.17.9/dist/pdf-lib.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <style>
+    /* Custom Scrollbars & Canvas Stacking */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+    .dark ::-webkit-scrollbar-thumb { background: #334155; }
+    
+    .canvas-container {
+      position: absolute !important;
+      top: 0;
+      left: 0;
+    }
+  </style>
+</head>
+<body class="bg-slate-100 dark:bg-slate-950 text-slate-800 dark:text-slate-100 h-screen w-screen overflow-hidden flex flex-col font-sans select-none">
+
+  <!-- TOP HEADER -->
+  <header class="h-14 border-b border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md px-4 flex items-center justify-between z-30 shrink-0">
+    <div class="flex items-center gap-3">
+      <div class="flex items-center gap-2 font-bold tracking-tight text-brand-600 dark:text-brand-500 text-lg">
+        <div class="p-1.5 bg-brand-50 dark:bg-brand-950/60 rounded-lg border border-brand-500/20">
+          <i data-lucide="layers" class="w-5 h-5"></i>
+        </div>
+        <span>Nova<span class="text-slate-900 dark:text-white font-black">PDF</span></span>
+      </div>
+      <span id="fileName" class="text-xs text-slate-400 font-medium max-w-[200px] truncate border-l border-slate-300 dark:border-slate-700 pl-3">No document loaded</span>
+    </div>
+
+    <!-- Zoom & Page Controls -->
+    <div class="flex items-center gap-2 bg-slate-100 dark:bg-slate-800/70 p-1 rounded-xl border border-slate-200/80 dark:border-slate-700/60">
+      <button id="btnZoomOut" class="p-1.5 hover:bg-white dark:hover:bg-slate-700 rounded-lg transition" title="Zoom Out (Ctrl -)">
+        <i data-lucide="zoom-out" class="w-4 h-4"></i>
+      </button>
+      <span id="zoomLevel" class="text-xs font-semibold px-2 min-w-[50px] text-center">100%</span>
+      <button id="btnZoomIn" class="p-1.5 hover:bg-white dark:hover:bg-slate-700 rounded-lg transition" title="Zoom In (Ctrl +)">
+        <i data-lucide="zoom-in" class="w-4 h-4"></i>
+      </button>
+      <div class="h-4 w-[1px] bg-slate-300 dark:bg-slate-700 mx-1"></div>
+      <span id="pageCounter" class="text-xs text-slate-500 font-medium px-2">0 / 0</span>
+    </div>
+
+    <!-- Top Right Actions -->
+    <div class="flex items-center gap-2">
+      <label class="cursor-pointer bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 font-medium text-xs px-3.5 py-2 rounded-xl transition flex items-center gap-2">
+        <i data-lucide="file-up" class="w-4 h-4"></i>
+        <span>Open PDF</span>
+        <input type="file" id="fileInput" accept="application/pdf" class="hidden" />
+      </label>
+      <button id="btnExport" class="bg-brand-600 hover:bg-brand-700 text-white font-medium text-xs px-4 py-2 rounded-xl shadow-sm hover:shadow-brand-500/25 transition flex items-center gap-2 disabled:opacity-50">
+        <i data-lucide="download" class="w-4 h-4"></i>
+        <span>Export Burned PDF</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- MAIN WORKSPACE -->
+  <div class="flex-1 flex relative overflow-hidden">
+
+    <!-- COLLAPSIBLE THUMBNAIL SIDEBAR -->
+    <aside id="sidebar" class="w-56 border-r border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex flex-col shrink-0 transition-all duration-300">
+      <div class="p-3 font-semibold text-xs text-slate-400 uppercase tracking-wider flex justify-between items-center">
+        <span>Thumbnails</span>
+      </div>
+      <div id="thumbnailContainer" class="flex-1 overflow-y-auto p-3 space-y-3">
+        <!-- Thumbnails appended via JS -->
+      </div>
+    </aside>
+
+    <!-- PDF CANVAS VIEWPORT -->
+    <main id="viewport" class="flex-1 overflow-auto bg-slate-200/70 dark:bg-slate-950 p-8 flex flex-col items-center gap-8 relative">
+      
+      <!-- EMPTY STATE / DROPZONE -->
+      <div id="dropZone" class="m-auto border-2 border-dashed border-slate-300 dark:border-slate-800 rounded-3xl p-12 text-center max-w-lg bg-white/50 dark:bg-slate-900/50 backdrop-blur-md">
+        <div class="w-16 h-16 bg-brand-50 dark:bg-brand-950/80 text-brand-600 dark:text-brand-400 rounded-2xl flex items-center justify-center mx-auto mb-4">
+          <i data-lucide="file-plus-2" class="w-8 h-8"></i>
+        </div>
+        <h2 class="text-lg font-bold">Open a PDF to start annotating</h2>
+        <p class="text-xs text-slate-500 mt-2">Drag and drop your file here, or click Browse to load your document locally.</p>
+        <button onclick="document.getElementById('fileInput').click()" class="mt-6 px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold rounded-xl">
+          Browse Computer
+        </button>
+      </div>
+
+      <!-- PAGES CONTAINER -->
+      <div id="pagesContainer" class="flex flex-col items-center gap-8"></div>
+    </main>
+
+    <!-- FIGMA-STYLE FLOATING COMMAND TOOLBAR -->
+    <div id="floatingDock" class="hidden absolute bottom-6 left-1/2 -translate-x-1/2 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border border-slate-200 dark:border-slate-800 px-3 py-2 rounded-2xl shadow-2xl flex items-center gap-1.5 z-40">
+      
+      <button data-tool="select" class="tool-btn active-tool p-2 rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition" title="Select / Move (V)">
+        <i data-lucide="mouse-pointer-2" class="w-5 h-5"></i>
+      </button>
+
+      <div class="h-5 w-[1px] bg-slate-200 dark:bg-slate-800 mx-1"></div>
+
+      <button data-tool="pen" class="tool-btn p-2 rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition" title="Pen (P)">
+        <i data-lucide="pencil" class="w-5 h-5"></i>
+      </button>
+
+      <button data-tool="highlighter" class="tool-btn p-2 rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition" title="Smart Highlighter (H)">
+        <i data-lucide="highlighter" class="w-5 h-5"></i>
+      </button>
+
+      <button data-tool="text" class="tool-btn p-2 rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition" title="Text Box (T)">
+        <i data-lucide="type" class="w-5 h-5"></i>
+      </button>
+
+      <button data-tool="rectangle" class="tool-btn p-2 rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition" title="Rectangle (R)">
+        <i data-lucide="square" class="w-5 h-5"></i>
+      </button>
+
+      <button data-tool="circle" class="tool-btn p-2 rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition" title="Circle (O)">
+        <i data-lucide="circle" class="w-5 h-5"></i>
+      </button>
+
+      <div class="h-5 w-[1px] bg-slate-200 dark:bg-slate-800 mx-1"></div>
+
+      <!-- Color Palette Preset -->
+      <div class="flex items-center gap-1 px-1">
+        <button class="color-dot w-5 h-5 rounded-full bg-slate-900 border-2 border-white dark:border-slate-700 shadow-sm" data-color="#0f172a"></button>
+        <button class="color-dot w-5 h-5 rounded-full bg-red-500 border-2 border-white dark:border-slate-700 shadow-sm" data-color="#ef4444"></button>
+        <button class="color-dot w-5 h-5 rounded-full bg-blue-500 border-2 border-white dark:border-slate-700 shadow-sm" data-color="#3b82f6"></button>
+        <button class="color-dot w-5 h-5 rounded-full bg-amber-400 border-2 border-white dark:border-slate-700 shadow-sm" data-color="#f59e0b"></button>
+        <input type="color" id="customColor" value="#0f172a" class="w-5 h-5 rounded-full cursor-pointer bg-transparent border-0 opacity-0 absolute pointer-events-none" />
+      </div>
+
+      <div class="h-5 w-[1px] bg-slate-200 dark:bg-slate-800 mx-1"></div>
+
+      <!-- Undo / Delete -->
+      <button id="btnUndo" class="p-2 rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition" title="Undo (Ctrl+Z)">
+        <i data-lucide="undo" class="w-5 h-5"></i>
+      </button>
+      <button id="btnDelete" class="p-2 rounded-xl text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 transition" title="Delete Selection (Del)">
+        <i data-lucide="trash-2" class="w-5 h-5"></i>
+      </button>
+    </div>
+
+  </div>
+
+  <script>
+    // Set PDF.js Worker
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+    // Application State
+    const state = {
+      pdfDoc: null,
+      pdfBytes: null,
+      currentScale: 1.25,
+      currentTool: 'select',
+      currentColor: '#0f172a',
+      strokeWidth: 3,
+      pageCanvases: [], // Array of Fabric.js instances
+      pageViewports: []
+    };
+
+    lucide.createIcons();
+
+    // DOM Elements
+    const fileInput = document.getElementById('fileInput');
+    const pagesContainer = document.getElementById('pagesContainer');
+    const dropZone = document.getElementById('dropZone');
+    const floatingDock = document.getElementById('floatingDock');
+    const thumbnailContainer = document.getElementById('thumbnailContainer');
+    const fileNameEl = document.getElementById('fileName');
+    const pageCounterEl = document.getElementById('pageCounter');
+    const zoomLevelEl = document.getElementById('zoomLevel');
+
+    // Drag and Drop Handling
+    window.addEventListener('dragover', (e) => e.preventDefault());
+    window.addEventListener('drop', (e) => {
+      e.preventDefault();
+      if (e.dataTransfer.files.length > 0 && e.dataTransfer.files[0].type === 'application/pdf') {
+        loadFile(e.dataTransfer.files[0]);
+      }
+    });
+
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files.length > 0) loadFile(e.target.files[0]);
+    });
+
+    async function loadFile(file) {
+      fileNameEl.textContent = file.name;
+      dropZone.classList.add('hidden');
+      floatingDock.classList.remove('hidden');
+      
+      const arrayBuffer = await file.arrayBuffer();
+      state.pdfBytes = arrayBuffer;
+      state.pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer.slice(0) }).promise;
+      
+      pageCounterEl.textContent = `1 / ${state.pdfDoc.numPages}`;
+      renderAllPages();
+    }
+
+    async function renderAllPages() {
+      pagesContainer.innerHTML = '';
+      thumbnailContainer.innerHTML = '';
+      state.pageCanvases = [];
+      state.pageViewports = [];
+
+      for (let pageNum = 1; pageNum <= state.pdfDoc.numPages; pageNum++) {
+        const page = await state.pdfDoc.getPage(pageNum);
+        const viewport = page.getViewport({ scale: state.currentScale });
+        state.pageViewports.push(viewport);
+
+        // Wrapper for page & annotation overlay
+        const pageWrapper = document.createElement('div');
+        pageWrapper.className = 'relative shadow-xl rounded-lg overflow-hidden bg-white mb-6';
+        pageWrapper.style.width = `${viewport.width}px`;
+        pageWrapper.style.height = `${viewport.height}px`;
+        pageWrapper.id = `page-wrapper-${pageNum}`;
+
+        // PDF Render Canvas
+        const pdfCanvas = document.createElement('canvas');
+        pdfCanvas.width = viewport.width;
+        pdfCanvas.height = viewport.height;
+        const pdfCtx = pdfCanvas.getContext('2d');
+        pageWrapper.appendChild(pdfCanvas);
+
+        // Annotation Layer Canvas (Fabric.js)
+        const fabricCanvasEl = document.createElement('canvas');
+        fabricCanvasEl.id = `fabric-canvas-${pageNum}`;
+        pageWrapper.appendChild(fabricCanvasEl);
+        pagesContainer.appendChild(pageWrapper);
+
+        // Render PDF page
+        await page.render({ canvasContext: pdfCtx, viewport: viewport }).promise;
+
+        // Initialize Fabric
+        const fCanvas = new fabric.Canvas(fabricCanvasEl, {
+          width: viewport.width,
+          height: viewport.height,
+          isDrawingMode: false,
+          selection: true
+        });
+
+        // Configure custom brushes
+        fCanvas.freeDrawingBrush.width = state.strokeWidth;
+        fCanvas.freeDrawingBrush.color = state.currentColor;
+
+        state.pageCanvases.push(fCanvas);
+
+        // Build thumbnail
+        buildThumbnail(page, pageNum);
+      }
+
+      applyToolToAllCanvases(state.currentTool);
+      lucide.createIcons();
+    }
+
+    async function buildThumbnail(page, pageNum) {
+      const thumbViewport = page.getViewport({ scale: 0.2 });
+      const thumbItem = document.createElement('div');
+      thumbItem.className = 'cursor-pointer group flex flex-col items-center gap-1 p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition';
+      
+      const thumbCanvas = document.createElement('canvas');
+      thumbCanvas.width = thumbViewport.width;
+      thumbCanvas.height = thumbViewport.height;
+      thumbCanvas.className = 'rounded-md shadow-sm border border-slate-200 dark:border-slate-700';
+
+      const thumbCtx = thumbCanvas.getContext('2d');
+      await page.render({ canvasContext: thumbCtx, viewport: thumbViewport }).promise;
+
+      thumbItem.appendChild(thumbCanvas);
+      thumbItem.innerHTML += `<span class="text-[10px] font-semibold text-slate-400 group-hover:text-slate-700 dark:group-hover:text-slate-200">Page ${pageNum}</span>`;
+      
+      thumbItem.addEventListener('click', () => {
+        document.getElementById(`page-wrapper-${pageNum}`).scrollIntoView({ behavior: 'smooth' });
+        pageCounterEl.textContent = `${pageNum} / ${state.pdfDoc.numPages}`;
+      });
+
+      thumbnailContainer.appendChild(thumbItem);
+    }
+
+    // Floating Tool Selector Logic
+    const toolButtons = document.querySelectorAll('.tool-btn');
+    toolButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        toolButtons.forEach(b => b.classList.remove('bg-brand-50', 'dark:bg-slate-800', 'text-brand-600'));
+        btn.classList.add('bg-brand-50', 'dark:bg-slate-800', 'text-brand-600');
+        state.currentTool = btn.dataset.tool;
+        applyToolToAllCanvases(state.currentTool);
+      });
+    });
+
+    function applyToolToAllCanvases(tool) {
+      state.pageCanvases.forEach(canvas => {
+        canvas.isDrawingMode = false;
+        canvas.selection = false;
+        canvas.defaultCursor = 'crosshair';
+
+        // Clear listeners
+        canvas.off('mouse:down');
+
+        if (tool === 'select') {
+          canvas.selection = true;
+          canvas.defaultCursor = 'default';
+        } else if (tool === 'pen') {
+          canvas.isDrawingMode = true;
+          canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
+          canvas.freeDrawingBrush.width = state.strokeWidth;
+          canvas.freeDrawingBrush.color = state.currentColor;
+        } else if (tool === 'highlighter') {
+          canvas.isDrawingMode = true;
+          canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
+          canvas.freeDrawingBrush.width = 24;
+          // Semi-transparent yellow/color
+          canvas.freeDrawingBrush.color = 'rgba(250, 204, 21, 0.4)';
+        } else if (tool === 'text') {
+          canvas.on('mouse:down', function(o) {
+            if (o.target) return;
+            const pointer = canvas.getPointer(o.e);
+            const text = new fabric.IText('Type here...', {
+              left: pointer.x,
+              top: pointer.y,
+              fontSize: 18,
+              fill: state.currentColor,
+              fontFamily: 'sans-serif'
+            });
+            canvas.add(text);
+            canvas.setActiveObject(text);
+            text.enterEditing();
+            applyToolToAllCanvases('select');
+          });
+        } else if (tool === 'rectangle') {
+          canvas.on('mouse:down', function(o) {
+            if (o.target) return;
+            const pointer = canvas.getPointer(o.e);
+            const rect = new fabric.Rect({
+              left: pointer.x,
+              top: pointer.y,
+              width: 100,
+              height: 60,
+              fill: 'transparent',
+              stroke: state.currentColor,
+              strokeWidth: state.strokeWidth,
+              rx: 4, ry: 4
+            });
+            canvas.add(rect);
+            canvas.setActiveObject(rect);
+            applyToolToAllCanvases('select');
+          });
+        } else if (tool === 'circle') {
+          canvas.on('mouse:down', function(o) {
+            if (o.target) return;
+            const pointer = canvas.getPointer(o.e);
+            const circle = new fabric.Circle({
+              left: pointer.x,
+              top: pointer.y,
+              radius: 40,
+              fill: 'transparent',
+              stroke: state.currentColor,
+              strokeWidth: state.strokeWidth
+            });
+            canvas.add(circle);
+            canvas.setActiveObject(circle);
+            applyToolToAllCanvases('select');
+          });
+        }
+      });
+    }
+
+    // Color Pickers
+    document.querySelectorAll('.color-dot').forEach(dot => {
+      dot.addEventListener('click', () => {
+        state.currentColor = dot.dataset.color;
+        applyToolToAllCanvases(state.currentTool);
+      });
+    });
+
+    // Delete Active Objects
+    document.getElementById('btnDelete').addEventListener('click', deleteSelected);
+    function deleteSelected() {
+      state.pageCanvases.forEach(canvas => {
+        const active = canvas.getActiveObjects();
+        if (active.length) {
+          canvas.discardActiveObject();
+          canvas.remove(...active);
+        }
+      });
+    }
+
+    // Undo Action
+    document.getElementById('btnUndo').addEventListener('click', () => {
+      state.pageCanvases.forEach(canvas => {
+        const objects = canvas.getObjects();
+        if (objects.length > 0) {
+          canvas.remove(objects[objects.length - 1]);
+        }
+      });
+    });
+
+    // Zoom Handling
+    document.getElementById('btnZoomIn').addEventListener('click', () => changeZoom(0.15));
+    document.getElementById('btnZoomOut').addEventListener('click', () => changeZoom(-0.15));
+
+    function changeZoom(delta) {
+      if (!state.pdfDoc) return;
+      const newScale = Math.min(Math.max(0.6, state.currentScale + delta), 2.5);
+      state.currentScale = newScale;
+      zoomLevelEl.textContent = `${Math.round(newScale * 100)}%`;
+      renderAllPages();
+    }
+
+    // Keyboard Shortcuts (Figma/Linear workflow)
+    window.addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.isContentEditable) return;
+      
+      if (e.key === 'v' || e.key === 'V') triggerTool('select');
+      if (e.key === 'p' || e.key === 'P') triggerTool('pen');
+      if (e.key === 'h' || e.key === 'H') triggerTool('highlighter');
+      if (e.key === 't' || e.key === 'T') triggerTool('text');
+      if (e.key === 'r' || e.key === 'R') triggerTool('rectangle');
+      if (e.key === 'o' || e.key === 'O') triggerTool('circle');
+      if (e.key === 'Backspace' || e.key === 'Delete') deleteSelected();
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+        document.getElementById('btnUndo').click();
+      }
+    });
+
+    function triggerTool(name) {
+      const btn = document.querySelector(`[data-tool="${name}"]`);
+      if (btn) btn.click();
+    }
+
+    // High-Fidelity PDF Export with Burned-In Annotations
+    document.getElementById('btnExport').addEventListener('click', async () => {
+      if (!state.pdfBytes) return;
+      const exportBtn = document.getElementById('btnExport');
+      exportBtn.disabled = true;
+      exportBtn.innerHTML = `<span class="animate-spin mr-1">⏳</span> Exporting...`;
+
+      try {
+        const pdfDoc = await PDFLib.PDFDocument.load(state.pdfBytes);
+        const pages = pdfDoc.getPages();
+
+        for (let i = 0; i < pages.length; i++) {
+          const fCanvas = state.pageCanvases[i];
+          if (!fCanvas || fCanvas.getObjects().length === 0) continue;
+
+          // Convert overlay canvas to transparent PNG
+          const dataUrl = fCanvas.toDataURL({ format: 'png', multiplier: 2 });
+          const pngImageBytes = await fetch(dataUrl).then(res => res.arrayBuffer());
+          const pngImage = await pdfDoc.embedPng(pngImageBytes);
+
+          const page = pages[i];
+          const { width, height } = page.getSize();
+
+          // Burn canvas into PDF page
+          page.drawImage(pngImage, {
+            x: 0,
+            y: 0,
+            width: width,
+            height: height,
+          });
+        }
+
+        const modifiedBytes = await pdfDoc.save();
+        const blob = new Blob([modifiedBytes], { type: 'application/pdf' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `annotated_${fileNameEl.textContent || 'document.pdf'}`;
+        link.click();
+      } catch (err) {
+        console.error(err);
+        alert('Failed to export PDF: ' + err.message);
+      } finally {
+        exportBtn.disabled = false;
+        exportBtn.innerHTML = `<i data-lucide="download" class="w-4 h-4"></i><span>Export Burned PDF</span>`;
+        lucide.createIcons();
+      }
+    });
+  </script>
+</body>
+</html>
