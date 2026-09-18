@@ -435,13 +435,14 @@
           <kbd class="justify-self-start bg-raised border border-hairline2 rounded px-2 py-0.5">Del</kbd><span class="text-paper/80 self-center">Delete selected item</span>
           <kbd class="justify-self-start bg-raised border border-hairline2 rounded px-2 py-0.5">Ctrl+Z</kbd><span class="text-paper/80 self-center">Undo</span>
           <kbd class="justify-self-start bg-raised border border-hairline2 rounded px-2 py-0.5">Ctrl+Shift+Z</kbd><span class="text-paper/80 self-center">Redo</span>
+          <kbd class="justify-self-start bg-raised border border-hairline2 rounded px-2 py-0.5">Ctrl+S</kbd><span class="text-paper/80 self-center">Export annotated PDF</span>
           <kbd class="justify-self-start bg-raised border border-hairline2 rounded px-2 py-0.5">Esc</kbd><span class="text-paper/80 self-center">Deselect / cancel</span>
           <kbd class="justify-self-start bg-raised border border-hairline2 rounded px-2 py-0.5">+ / -</kbd><span class="text-paper/80 self-center">Zoom in / out</span>
           <kbd class="justify-self-start bg-raised border border-hairline2 rounded px-2 py-0.5">0</kbd><span class="text-paper/80 self-center">Reset zoom</span>
           <kbd class="justify-self-start bg-raised border border-hairline2 rounded px-2 py-0.5">?</kbd><span class="text-paper/80 self-center">This panel</span>
         </div>
         <p class="text-muted pt-3 border-t border-hairline mt-3 leading-relaxed">
-          With the Select tool, click any shape to move it, drag its handle to resize it, or click the red badge to delete it. Click a comment pin to jump to it in the sidebar — with the Eraser tool active, click a pin to delete it. Everything also works with touch and stylus input.
+          With the Select tool, click any shape to move it, drag its handle to resize it, or click the red badge to delete it. Click a comment pin to jump to it in the sidebar — with the Eraser tool active, click or drag across pins and marks to delete them. Everything also works with touch and stylus input.
         </p>
       </div>
     </div>
@@ -487,10 +488,12 @@
 
       isDrawing: false,
       currentShape: null,
+      isErasing: false,
 
       selected: null,         // {pageNum, id}
       dragMode: null,         // 'move' | 'resize-corner' | 'resize-p1' | 'resize-p2'
       dragStart: null,        // {pos:{x,y}, orig: cloned annotation}
+      historyPending: false,  // true while a select-tool drag/resize is in progress but hasn't actually changed geometry yet
 
       history: [],
       future: [],
@@ -537,6 +540,53 @@
 
     // shared offscreen context, used only for measuring text bounding boxes
     const measureCtx = document.createElement('canvas').getContext('2d');
+
+    // =======================================================================
+    // RUNTIME CAPABILITIES (published-page file saving)
+    // =======================================================================
+    // On claude.ai, plain <a download> / link.click() saves are inert once this
+    // page is published — the viewer must be asked via the `downloads`
+    // capability instead. Outside that shell (e.g. this file opened directly
+    // in a browser) window.claude won't exist, so we transparently fall back
+    // to a normal anchor-click download in that case.
+    let downloadsCapPromise = null;
+    function getDownloadsCapability() {
+      if (!downloadsCapPromise) {
+        downloadsCapPromise = (window.claude && typeof window.claude.use === 'function')
+          ? window.claude.use('downloads').catch(() => null)
+          : Promise.resolve(null);
+      }
+      return downloadsCapPromise;
+    }
+    async function saveFile(filename, blob) {
+      const downloads = await getDownloadsCapability();
+      if (downloads) {
+        try {
+          await downloads.save({ filename, data: blob });
+          return true;
+        } catch (err) {
+          const code = err && err.code;
+          if (code === 'declined') return false; // viewer said no — respect it, no fallback
+          showToast('Could not save "' + filename + '": ' + (err && err.message ? err.message : 'unknown error'));
+          return false;
+        }
+      }
+      // Fallback for contexts without the downloads capability (e.g. run standalone).
+      try {
+        const link = document.createElement('a');
+        const url = URL.createObjectURL(blob);
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+        return true;
+      } catch (err) {
+        showToast('Could not save file: ' + err.message);
+        return false;
+      }
+    }
 
     // =======================================================================
     // TOAST NOTIFICATIONS
@@ -656,6 +706,7 @@
     // AUTOSAVE (localStorage, keyed per document)
     // =======================================================================
     let autosaveTimer = null;
+    let activeRestoreToast = null; // {el, key} — the currently-shown "restore previous annotations?" prompt, if any
     function getFileKey() {
       if (!App.pdfDoc) return null;
       return `acromark_v1::${App.currentFileName || 'sample'}::${App.currentFileSize || 0}::${App.numPages}`;
@@ -673,7 +724,14 @@
         } catch (err) { /* storage full or unavailable — fail silently */ }
       }, 800);
     }
+    function dismissRestorePrompt() {
+      if (activeRestoreToast) {
+        activeRestoreToast.el.remove();
+        activeRestoreToast = null;
+      }
+    }
     function checkForAutosave() {
+      dismissRestorePrompt();
       if (!App.fileKey) return;
       let raw;
       try { raw = localStorage.getItem(App.fileKey); } catch (e) { return; }
@@ -683,14 +741,27 @@
       const hasContent = (data.comments && data.comments.length) ||
         Object.values(data.pageAnnotations || {}).some(list => list && list.length);
       if (!hasContent) return;
+      // Capture which document this prompt belongs to, so Restore/Discard can never be
+      // misapplied to a different document the person has since opened.
+      const keyAtPrompt = App.fileKey;
       const when = data.savedAt ? new Date(data.savedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'a previous session';
-      showToast(`Unsaved annotations found from ${when}.`, {
+      const toastEl = showToast(`Unsaved annotations found from ${when}.`, {
         persistent: true,
         actions: [
-          { label: 'Restore', onClick: () => applyRestoredData(data) },
-          { label: 'Discard', onClick: () => { try { localStorage.removeItem(App.fileKey); } catch (e) {} } }
+          {
+            label: 'Restore', onClick: () => {
+              if (App.fileKey !== keyAtPrompt) return; // a different document is open now — ignore
+              applyRestoredData(data);
+            }
+          },
+          {
+            label: 'Discard', onClick: () => {
+              try { localStorage.removeItem(keyAtPrompt); } catch (e) {}
+            }
+          }
         ]
       });
+      activeRestoreToast = { el: toastEl, key: keyAtPrompt };
     }
     function applyRestoredData(data) {
       App.pageAnnotations = data.pageAnnotations || {};
@@ -942,17 +1013,20 @@
         }
         for (const h of sel.handles) {
           if (dist(pos, h) <= 11) {
-            pushHistory();
+            // Don't push history yet — only once the resize actually moves something
+            // (see handleSelectPointerMove). A click with no movement should not
+            // create a no-op undo step.
             App.dragMode = 'resize-' + h.id;
             App.dragStart = { pos: toPdfSpace(pos) };
+            App.historyPending = true;
             return;
           }
         }
         const within = pos.x >= sel.rect.x1 - 6 && pos.x <= sel.rect.x2 + 6 && pos.y >= sel.rect.y1 - 6 && pos.y <= sel.rect.y2 + 6;
         if (within) {
-          pushHistory();
           App.dragMode = 'move';
           App.dragStart = { pos: toPdfSpace(pos), orig: structuredClone(sel.a) };
+          App.historyPending = true;
           return;
         }
       }
@@ -963,9 +1037,9 @@
         if (hitTestAnnotation(list[i], pdfPos, App.scale)) {
           App.selected = { pageNum, id: list[i].id };
           redrawPageAnnotations(pageNum);
-          pushHistory();
           App.dragMode = 'move';
           App.dragStart = { pos: pdfPos, orig: structuredClone(list[i]) };
+          App.historyPending = true;
           return;
         }
       }
@@ -975,6 +1049,7 @@
       if (!App.dragMode || !App.selected || App.selected.pageNum !== pageNum) return;
       const a = findAnnotation(pageNum, App.selected.id);
       if (!a) return;
+      if (App.historyPending) { pushHistory(); App.historyPending = false; }
       const p = toPdfSpace(pos);
       if (App.dragMode === 'move') {
         const dx = p.x - App.dragStart.pos.x;
@@ -1206,6 +1281,7 @@
         } else if (App.activeTool === 'comment') {
           promptCommentPin(pageNum, pos);
         } else if (App.activeTool === 'eraser') {
+          App.isErasing = true;
           eraseAt(pageNum, pos);
         }
       });
@@ -1214,6 +1290,10 @@
         const pos = getPos(e);
         if (App.activeTool === 'select' && App.dragMode) {
           handleSelectPointerMove(pageNum, pos);
+          return;
+        }
+        if (App.activeTool === 'eraser' && App.isErasing) {
+          eraseAt(pageNum, pos);
           return;
         }
         if (!App.isDrawing || !App.currentShape) return;
@@ -1242,7 +1322,11 @@
 
       function finishStroke() {
         if (App.activeTool === 'select') {
-          if (App.dragMode) { App.dragMode = null; App.dragStart = null; scheduleAutosave(); }
+          if (App.dragMode) { App.dragMode = null; App.dragStart = null; App.historyPending = false; scheduleAutosave(); }
+          return;
+        }
+        if (App.activeTool === 'eraser') {
+          App.isErasing = false;
           return;
         }
         if (App.isDrawing && App.currentShape) {
@@ -1551,15 +1635,20 @@
         document.querySelectorAll('.tool-btn').forEach(b => {
           b.classList.remove('bg-ink-300', 'text-[#1a1509]');
           b.classList.add('text-muted');
+          b.setAttribute('aria-pressed', 'false');
         });
         btn.classList.add('bg-ink-300', 'text-[#1a1509]');
         btn.classList.remove('text-muted');
+        btn.setAttribute('aria-pressed', 'true');
         App.activeTool = btn.dataset.tool;
         App.isDrawing = false;
         App.currentShape = null;
+        App.isErasing = false;
         if (App.activeTool !== 'select') {
           const prevPage = App.selected ? App.selected.pageNum : null;
           App.selected = null;
+          App.dragMode = null;
+          App.historyPending = false;
           if (prevPage) redrawPageAnnotations(prevPage);
         }
         updateSizeControlForTool();
@@ -1646,11 +1735,13 @@
       App.imageCache = {};
       App.selected = null;
       App.dragMode = null;
+      App.historyPending = false;
       App.thumbBoxes = {};
       resetHistory();
     }
 
     async function loadPDFBytes(arrayBuffer, meta = {}) {
+      dismissRestorePrompt();
       showLoadingState(true);
       try {
         App.pdfBytes = arrayBuffer;
@@ -1867,12 +1958,9 @@
 
         const finalBytes = await pdfDoc.save();
         const blob = new Blob([finalBytes], { type: 'application/pdf' });
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
         const baseName = (App.currentFileName || 'document.pdf').replace(/\.pdf$/i, '');
-        link.download = `${baseName}_annotated.pdf`;
-        link.click();
-        showToast('Annotated PDF exported.');
+        const saved = await saveFile(`${baseName}_annotated.pdf`, blob);
+        if (saved) showToast('Annotated PDF exported.');
       } catch (err) {
         console.error(err);
         showToast('Export failed: ' + err.message);
@@ -1886,7 +1974,7 @@
     // =======================================================================
     // EXPORT / IMPORT PROJECT (.json — editable annotation sidecar file)
     // =======================================================================
-    document.getElementById('btnExportProject').addEventListener('click', () => {
+    document.getElementById('btnExportProject').addEventListener('click', async () => {
       closeExportMenu();
       if (!App.pdfDoc) { showToast('Open a PDF first.'); return; }
       const payload = {
@@ -1898,12 +1986,9 @@
         exportedAt: new Date().toISOString()
       };
       const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
       const baseName = (App.currentFileName || 'annotations').replace(/\.pdf$/i, '');
-      link.download = `${baseName}.acromark.json`;
-      link.click();
-      showToast('Project file saved.');
+      const saved = await saveFile(`${baseName}.acromark.json`, blob);
+      if (saved) showToast('Project file saved.');
     });
 
     document.getElementById('projectFileInput').addEventListener('change', async (e) => {
@@ -1915,6 +2000,9 @@
         const data = JSON.parse(text);
         if (!data || typeof data.pageAnnotations !== 'object') throw new Error('Not a valid AcroMark project file.');
         if (!App.pdfDoc) { showToast('Open the matching PDF before importing annotations.'); return; }
+        if (data.numPages && data.numPages !== App.numPages) {
+          showToast(`Heads up: this project was saved for a ${data.numPages}-page document, but the open PDF has ${App.numPages}. Importing anyway.`, { duration: 6000 });
+        }
         pushHistory();
         App.pageAnnotations = data.pageAnnotations || {};
         App.comments = data.comments || [];
@@ -1955,6 +2043,12 @@
 
       const key = e.key.toLowerCase();
       const toolMap = { v: 'select', p: 'pen', h: 'highlighter', a: 'arrow', l: 'line', r: 'rect', c: 'circle', t: 'text', n: 'comment', e: 'eraser' };
+
+      if ((e.ctrlKey || e.metaKey) && key === 's') {
+        e.preventDefault();
+        document.getElementById('btnExport').click();
+        return;
+      }
 
       if (!e.ctrlKey && !e.metaKey && !e.altKey) {
         if (toolMap[key]) { document.querySelector(`[data-tool="${toolMap[key]}"]`)?.click(); return; }
