@@ -393,6 +393,9 @@
       <button type="button" data-tool="octagon" class="tool-btn" title="Octagon"><i data-lucide="octagon" class="w-5 h-5"></i></button>
       <button type="button" data-tool="star" class="tool-btn" title="Star"><i data-lucide="star" class="w-5 h-5"></i></button>
       <button type="button" data-tool="arrow2" class="tool-btn" title="Double-Headed Arrow"><i data-lucide="arrow-left-right" class="w-5 h-5"></i></button>
+      <button type="button" data-tool="curve" class="tool-btn" title="Curved Line">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5"><path d="M4 18 Q12 2 20 18"/></svg>
+      </button>
     </div>
 
     <!-- PAGE THUMBNAILS RAIL -->
@@ -536,7 +539,7 @@
       <div class="p-4 overflow-y-auto text-xs space-y-1">
         <div id="helpGrid" class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2"></div>
         <p class="text-muted pt-3 border-t border-hairline mt-3 leading-relaxed">
-          With the Select tool, click a shape to move it, drag its handle to resize it, or click the red badge to delete it. Double-click (or double-tap) text to edit it, and use the arrow keys to nudge. Hold Shift while drawing a line, arrow, rectangle or circle to snap the angle or make it square. Changing the colour or size while something is selected restyles it. On touch screens, use the Pan tool to scroll the page.
+          With the Select tool, click a shape to move it, drag any of its points to reshape it, or click the red badge to delete it. Curved lines have a third point in the middle — drag it to bend the curve. Double-click (or double-tap) text to edit it, and use the arrow keys to nudge. Hold Shift while drawing a line, arrow, curve, rectangle or circle to snap the angle or make it square. Changing the colour or size while something is selected restyles it. On touch screens, use the Pan tool to scroll the page.
         </p>
       </div>
     </div>
@@ -607,7 +610,11 @@ const POLY_SHAPES = {
 const BOX_SHAPE_TYPES = new Set(['rect', 'roundrect', 'circle', 'triangle', 'diamond', 'pentagon', 'hexagon', 'octagon', 'star']);
 // Every shape tool that drags out a directional x1,y1 → x2,y2 segment (like line/arrow).
 const DIRECTIONAL_SHAPE_TYPES = new Set(['line', 'arrow', 'arrow2']);
-const SHAPE_TOOLS = [...DIRECTIONAL_SHAPE_TYPES, ...BOX_SHAPE_TYPES];
+// The curved line: two endpoints (x1,y1 / x2,y2) plus a third point (cx,cy) that the curve is
+// pulled through at its midpoint — a freely-draggable "bend" handle, not a Bezier control handle
+// offset from the visible curve.
+const CURVE_SHAPE_TYPES = new Set(['curve']);
+const SHAPE_TOOLS = [...DIRECTIONAL_SHAPE_TYPES, ...BOX_SHAPE_TYPES, ...CURVE_SHAPE_TYPES];
 // Maps an annotation's box onto its shape's unit-box points, in document units.
 function polygonPointsFor(a) {
   const x1 = Math.min(a.x1, a.x2), x2 = Math.max(a.x1, a.x2);
@@ -619,6 +626,20 @@ function polygonPointsFor(a) {
 // so a huge rectangle doesn't grow absurdly round corners.
 function roundRectRadius(a) {
   return Math.min(30, Math.min(Math.abs(a.x2 - a.x1), Math.abs(a.y2 - a.y1)) * 0.25);
+}
+
+// ---- curved line: a.cx,a.cy is the point the curve visibly passes through at its middle (t=0.5),
+// not a Bezier control point. A quadratic Bezier's midpoint is the average of its start, control
+// and end points weighted 1:2:1 — B(0.5) = 0.25*P0 + 0.5*Q + 0.25*P1 — so solving for Q from the
+// wanted midpoint gives Q = 2*mid - 0.5*(P0+P1). This keeps the point the user actually sees and
+// drags the honest source of truth, while rendering/export/hit-testing derive the real control
+// point from it on demand. ----
+function curveControlPoint(a) {
+  return { x: 2 * a.cx - (a.x1 + a.x2) / 2, y: 2 * a.cy - (a.y1 + a.y2) / 2 };
+}
+function curvePointAt(a, t) {
+  const q = curveControlPoint(a), mt = 1 - t;
+  return { x: mt * mt * a.x1 + 2 * mt * t * q.x + t * t * a.x2, y: mt * mt * a.y1 + 2 * mt * t * q.y + t * t * a.y2 };
 }
 
 function bytesFromDataUrl(dataUrl) {
@@ -775,6 +796,13 @@ async function buildAnnotatedPdf(opts) {
               xScale: Math.max(0.01, Math.abs(c1.x - c2.x) / 2), yScale: Math.max(0.01, Math.abs(c1.y - c2.y) / 2),
               borderColor: color, borderWidth: a.width
             });
+            break;
+          }
+          case 'curve': {   // SVG "Q" is itself a single-control quadratic Bezier, so this maps 1:1
+            const q = curveControlPoint(a);
+            const p1 = P(a.x1, a.y1), pc = P(q.x, q.y), p2 = P(a.x2, a.y2);
+            const d = `M ${f(p1.x)} ${f(-p1.y)} Q ${f(pc.x)} ${f(-pc.y)} ${f(p2.x)} ${f(-p2.y)}`;
+            page.drawSvgPath(d, { x: 0, y: 0, borderColor: color, borderWidth: a.width, borderLineCap: LineCapStyle.Round });
             break;
           }
           case 'text': {
@@ -1101,6 +1129,13 @@ function sanitizeAnnotation(raw) {
       normalizeBox(a);
       return a;
     }
+    case 'curve': {
+      if (![raw.x1, raw.y1, raw.x2, raw.y2, raw.cx, raw.cy].every(isNum)) return null;
+      return {
+        id, type: 'curve', color, width: numOr(raw.width, 0.25, 200, 3),
+        x1: raw.x1, y1: raw.y1, x2: raw.x2, y2: raw.y2, cx: raw.cx, cy: raw.cy
+      };
+    }
     case 'text': {
       if (typeof raw.text !== 'string' || !raw.text.trim() || !isNum(raw.x) || !isNum(raw.y)) return null;
       return {
@@ -1310,6 +1345,12 @@ function drawAnnotation(ctx, a, s, pageNum) {
       ctx.ellipse((a.x1 + a.x2) / 2 * s, (a.y1 + a.y2) / 2 * s, Math.max(0.01, Math.abs(a.x2 - a.x1) / 2 * s), Math.max(0.01, Math.abs(a.y2 - a.y1) / 2 * s), 0, 0, Math.PI * 2);
       ctx.stroke();
       break;
+    case 'curve': {
+      const q = curveControlPoint(a);
+      ctx.strokeStyle = a.color; ctx.lineWidth = Math.max(0.5, a.width * s); ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(a.x1 * s, a.y1 * s); ctx.quadraticCurveTo(q.x * s, q.y * s, a.x2 * s, a.y2 * s); ctx.stroke();
+      break;
+    }
     case 'triangle': case 'diamond': case 'pentagon': case 'hexagon': case 'octagon': case 'star': {
       const pts = polygonPointsFor(a);
       ctx.strokeStyle = a.color; ctx.lineWidth = Math.max(0.5, a.width * s); ctx.lineJoin = 'round';
@@ -1383,6 +1424,11 @@ function getAnnotationBBox(a) {
       const pad = (a.width || 1) / 2 + 3;
       return { x1: Math.min(a.x1, a.x2) - pad, y1: Math.min(a.y1, a.y2) - pad, x2: Math.max(a.x1, a.x2) + pad, y2: Math.max(a.y1, a.y2) + pad };
     }
+    case 'curve': {   // a quadratic Bezier always lies inside the hull of its 3 control points
+      const q = curveControlPoint(a), pad = (a.width || 1) / 2 + 6;
+      const xs = [a.x1, a.x2, q.x], ys = [a.y1, a.y2, q.y];
+      return { x1: Math.min(...xs) - pad, y1: Math.min(...ys) - pad, x2: Math.max(...xs) + pad, y2: Math.max(...ys) + pad };
+    }
     case 'text': {
       const m = textMetrics(a);
       return { x1: a.x - 2, y1: a.y - a.fontSize, x2: a.x + m.w + 2, y2: a.y + (m.lines - 1) * a.fontSize * LINE_H + a.fontSize * 0.28 };
@@ -1424,6 +1470,15 @@ function hitTestAnnotation(a, p, scale) {
       }
       return false;
     }
+    case 'curve': {
+      let prev = { x: a.x1, y: a.y1 };
+      for (let i = 1; i <= 24; i++) {
+        const pt = curvePointAt(a, i / 24);
+        if (distToSegment(p, prev, pt) <= tol) return true;
+        prev = pt;
+      }
+      return false;
+    }
     default: {
       const b = getAnnotationBBox(a);
       return p.x >= b.x1 && p.x <= b.x2 && p.y >= b.y1 && p.y <= b.y2;
@@ -1455,11 +1510,17 @@ function getSelectionGeometry(pageNum) {
   const size = pageCssSize(pageNum);
   const badge = { cx: clamp(rect.x2, 12, size.w - 12), cy: clamp(rect.y1, 12, size.h - 12), r: 10 };
   let handles = [];
-  if (DIRECTIONAL_SHAPE_TYPES.has(a.type)) {
+  if (a.type === 'curve') {
+    // Three freely-draggable points: both endpoints, plus the point the curve bends through.
+    const h1 = toCanvasSpace({ x: a.x1, y: a.y1 }), h2 = toCanvasSpace({ x: a.x2, y: a.y2 }), h3 = toCanvasSpace({ x: a.cx, y: a.cy });
+    handles = [{ id: 'p1', x: h1.x, y: h1.y }, { id: 'p2', x: h2.x, y: h2.y }, { id: 'p3', x: h3.x, y: h3.y }];
+  } else if (DIRECTIONAL_SHAPE_TYPES.has(a.type) || BOX_SHAPE_TYPES.has(a.type)) {
+    // Both defining corners/endpoints are independent, freely-draggable points — dragging either
+    // one repositions and resizes the shape around the other, which stays put.
     const h1 = toCanvasSpace({ x: a.x1, y: a.y1 }), h2 = toCanvasSpace({ x: a.x2, y: a.y2 });
     handles = [{ id: 'p1', x: h1.x, y: h1.y }, { id: 'p2', x: h2.x, y: h2.y }];
-  } else if (BOX_SHAPE_TYPES.has(a.type) || a.type === 'image') {
-    handles = [{ id: 'corner', x: rect.x2, y: rect.y2 }];
+  } else if (a.type === 'image') {
+    handles = [{ id: 'corner', x: rect.x2, y: rect.y2 }];   // aspect-locked, so only the one handle
   }
   return { a, rect, badge, handles };
 }
@@ -1484,6 +1545,9 @@ function applyTranslatedGeometry(a, orig, dx, dy) {
     case 'line': case 'arrow': case 'arrow2': case 'rect': case 'roundrect': case 'circle':
     case 'triangle': case 'diamond': case 'pentagon': case 'hexagon': case 'octagon': case 'star':
       a.x1 = orig.x1 + dx; a.y1 = orig.y1 + dy; a.x2 = orig.x2 + dx; a.y2 = orig.y2 + dy; break;
+    case 'curve':
+      a.x1 = orig.x1 + dx; a.y1 = orig.y1 + dy; a.x2 = orig.x2 + dx; a.y2 = orig.y2 + dy;
+      a.cx = orig.cx + dx; a.cy = orig.cy + dy; break;
     case 'text': case 'image': a.x = orig.x + dx; a.y = orig.y + dy; break;
   }
 }
@@ -1563,13 +1627,12 @@ function handleSelectPointerMove(pageNum, pos) {
   }
   if (d.mode === 'move') {
     applyTranslatedGeometry(a, d.orig, p.x - d.start.x, p.y - d.start.y);
-  } else if (d.mode === 'resize-corner') {
-    if (a.type === 'image') {
-      a.width = Math.max(16, p.x - a.x);
-      a.height = a.width * (d.orig.height / d.orig.width);   // keep the signature's proportions
-    } else { a.x2 = p.x; a.y2 = p.y; }
-  } else if (d.mode === 'resize-p1') { a.x1 = p.x; a.y1 = p.y; }
-  else if (d.mode === 'resize-p2') { a.x2 = p.x; a.y2 = p.y; }
+  } else if (d.mode === 'resize-corner') {   // image only, aspect-locked
+    a.width = Math.max(16, p.x - a.x);
+    a.height = a.width * (d.orig.height / d.orig.width);   // keep the signature's proportions
+  } else if (d.mode === 'resize-p1') { a.x1 = p.x; a.y1 = p.y; }   // every other shape's points move
+  else if (d.mode === 'resize-p2') { a.x2 = p.x; a.y2 = p.y; }     // freely; the shape conforms to fit
+  else if (d.mode === 'resize-p3') { a.cx = p.x; a.cy = p.y; }     // curve's bend point
   requestRedraw(pageNum);
 }
 function finishSelectDrag(pageNum) {
@@ -1911,7 +1974,7 @@ function getPos(canvas, e) { const r = canvas.getBoundingClientRect(); return { 
 
 function constrainShape(s) {
   const dx = s.x2 - s.x1, dy = s.y2 - s.y1;
-  if (s.type === 'line' || s.type === 'arrow' || s.type === 'arrow2') {
+  if (s.type === 'line' || s.type === 'arrow' || s.type === 'arrow2' || s.type === 'curve') {
     const step = Math.PI / 4, ang = Math.round(Math.atan2(dy, dx) / step) * step, len = Math.hypot(dx, dy);
     s.x2 = s.x1 + Math.cos(ang) * len; s.y2 = s.y1 + Math.sin(ang) * len;
   } else {
@@ -1952,7 +2015,9 @@ function onPointerDown(e) {
     });
   } else if (SHAPE_TOOLS.includes(tool)) {
     const p = toPdfSpace(pos);
-    begin('draw', { shape: { id: genId(), type: tool, x1: p.x, y1: p.y, x2: p.x, y2: p.y, color: App.color, width: App.strokeWidth } });
+    const shape = { id: genId(), type: tool, x1: p.x, y1: p.y, x2: p.x, y2: p.y, color: App.color, width: App.strokeWidth };
+    if (tool === 'curve') { shape.cx = p.x; shape.cy = p.y; }   // starts flat; bend it after placing
+    begin('draw', { shape });
   } else if (tool === 'text') {
     const p = toPdfSpace(pos);
     const list = App.pageAnnotations[pageNum] || [];
@@ -1992,6 +2057,9 @@ function onPointerMove(e) {
       const p = toPdfSpace(pos);
       s.x2 = p.x; s.y2 = p.y;
       if (e.shiftKey) constrainShape(s);
+      // Keep the curve flat (bend point riding the midpoint) while it's still being dragged out —
+      // once placed, the user drags that point independently via its own selection handle.
+      if (s.type === 'curve') { s.cx = (s.x1 + s.x2) / 2; s.cy = (s.y1 + s.y2) / 2; }
     }
     requestRedraw(g.pageNum);
   }
@@ -2276,6 +2344,10 @@ function setTool(tool) {
     b.classList.toggle('active', on);
     b.setAttribute('aria-pressed', on ? 'true' : 'false');
   });
+  // The "More Shapes" launcher itself has no data-tool, so light it up by hand whenever the
+  // active tool is one of the shapes tucked inside its popover — otherwise picking, say, a star
+  // and closing the popover leaves no toolbar button looking selected.
+  btnMoreShapes.classList.toggle('active', shapesMenu.contains(document.querySelector(`.tool-btn[data-tool="${tool}"]`)));
   if (tool !== 'select' && App.selected) setSelected(null); else refreshControls();
 }
 function beginStyleEdit() { if (!App.styleEditOpen) { pushHistory(); App.styleEditOpen = true; } }
@@ -2745,6 +2817,7 @@ window.addEventListener('keydown', (e) => {
     if (!addCommentModal.classList.contains('hidden')) { closeAddCommentModal(); return; }
     if (!helpModal.classList.contains('hidden')) { closeHelpModal(); return; }
     closeExportMenu();
+    closeShapesMenu();
     if (App.gesture && App.gesture.kind === 'draw') { const pn = App.gesture.pageNum; App.gesture = null; requestRedraw(pn); }
     if (App.selected) setSelected(null);
     return;
@@ -2806,8 +2879,21 @@ viewportEl.addEventListener('wheel', (e) => {
   wheelTimer = setTimeout(() => { const f = Math.exp(clamp(wheelAccum, -400, 400) * 0.0025); wheelAccum = 0; setScale(App.scale * f); }, 70);
 }, { passive: false });
 
-document.querySelectorAll('.tool-btn[data-tool]').forEach((btn) => btn.addEventListener('click', () => setTool(btn.dataset.tool)));
+document.querySelectorAll('.tool-btn[data-tool]').forEach((btn) => btn.addEventListener('click', () => {
+  setTool(btn.dataset.tool);
+  if (shapesMenu.contains(btn)) closeShapesMenu();      // picking a shape from the popover closes it
+}));
 $('btnOpenSignature').addEventListener('click', openSignatureModal);
+btnMoreShapes.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const open = shapesMenu.classList.contains('hidden');
+  closeExportMenu();
+  if (open) openShapesMenu(); else closeShapesMenu();
+});
+shapesMenu.addEventListener('click', (e) => e.stopPropagation());
+document.addEventListener('click', closeShapesMenu);
+window.addEventListener('resize', closeShapesMenu);
+viewportEl.addEventListener('scroll', closeShapesMenu, { passive: true });
 
 // Buttons that change text style while the inline editor is focused must not steal focus —
 // stealing focus would blur (and thus commit/close) the editor before the style even applies.
