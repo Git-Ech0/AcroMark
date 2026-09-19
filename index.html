@@ -403,6 +403,23 @@
       </button>
     </div>
 
+    <!-- RIGHT-CLICK CONTEXT MENU — positioned via JS (fixed) at the click point, for whichever
+         mark is under the cursor at the time, regardless of which tool is active -->
+    <div id="annotContextMenu" role="menu" aria-label="Mark actions" class="hidden fixed z-40 bg-raised border border-hairline2 rounded-xl shadow-2xl overflow-hidden w-48 text-xs">
+      <button type="button" data-action="duplicate" role="menuitem" class="w-full text-left px-3 py-2 hover:bg-hairline transition flex items-center gap-2">
+        <i data-lucide="copy" class="w-3.5 h-3.5 text-accent"></i><span class="flex-1">Duplicate</span><kbd class="text-[10px] text-faint">Ctrl+D</kbd>
+      </button>
+      <button type="button" data-action="front" role="menuitem" class="w-full text-left px-3 py-2 hover:bg-hairline transition flex items-center gap-2 border-t border-hairline">
+        <i data-lucide="chevrons-up" class="w-3.5 h-3.5 text-accent"></i><span class="flex-1">Bring to Front</span>
+      </button>
+      <button type="button" data-action="back" role="menuitem" class="w-full text-left px-3 py-2 hover:bg-hairline transition flex items-center gap-2 border-t border-hairline">
+        <i data-lucide="chevrons-down" class="w-3.5 h-3.5 text-accent"></i><span class="flex-1">Send to Back</span>
+      </button>
+      <button type="button" data-action="delete" role="menuitem" class="w-full text-left px-3 py-2 hover:bg-hairline transition flex items-center gap-2 border-t border-hairline text-danger">
+        <i data-lucide="trash" class="w-3.5 h-3.5"></i><span class="flex-1">Delete</span><kbd class="text-[10px] text-faint">Del</kbd>
+      </button>
+    </div>
+
     <!-- PAGE THUMBNAILS RAIL -->
     <aside id="thumbnailsPanel" class="hidden w-[132px] border-r border-hairline bg-surface flex-col shrink-0 overflow-y-auto py-3 px-2.5 gap-2.5" aria-label="Page thumbnails">
       <div id="thumbnailsList" class="flex flex-col gap-2.5"></div>
@@ -544,7 +561,7 @@
       <div class="p-4 overflow-y-auto text-xs space-y-1">
         <div id="helpGrid" class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2"></div>
         <p class="text-muted pt-3 border-t border-hairline mt-3 leading-relaxed">
-          With the Select tool, click a shape to move it, drag any of its points to reshape it, or click the red badge to delete it. Curved lines have a third point in the middle — drag it to bend the curve. Double-click (or double-tap) text to edit it, and use the arrow keys to nudge. Hold Shift while drawing a line, arrow, curve, rectangle or circle to snap the angle or make it square. Changing the colour or size while something is selected restyles it. On touch screens, use the Pan tool to scroll the page.
+          With the Select tool, click a shape to move it, drag any of its points to reshape it, or click the red badge to delete it. Curved lines have a third point in the middle — drag it to bend the curve. Double-click (or double-tap) text to edit it, and use the arrow keys to nudge. Hold Shift while drawing a line, arrow, curve, rectangle or circle to snap the angle or make it square. Changing the colour or size while something is selected restyles it. Right-click any mark, in any tool, for Duplicate / Bring to Front / Send to Back / Delete. Hold the middle mouse button anywhere to pan without switching tools. On touch screens, use the Pan tool to scroll the page.
         </p>
       </div>
     </div>
@@ -934,6 +951,7 @@ const App = {
   gesture: null,                       // in-progress pointer interaction
   selected: null,                      // {pageNum, id}
   selDrag: null,                       // {mode, start, orig, moved}
+  hover: null,                         // {pageNum, id} of an unselected shape under the pointer (Select tool)
   styleEditOpen: false,
 
   history: [], future: [],
@@ -1501,6 +1519,7 @@ function setSelected(sel) {
   const prev = App.selected;
   App.selected = sel;
   App.styleEditOpen = false;
+  if (App.hover) { requestRedraw(App.hover.pageNum); App.hover = null; }   // the hover ring never overlaps the selection ring
   if (prev) requestRedraw(prev.pageNum);
   if (sel) requestRedraw(sel.pageNum);
   refreshControls();
@@ -1544,6 +1563,18 @@ function drawSelectionOverlay(ctx, sel) {
   ctx.fillText('\u00D7', sel.badge.cx, sel.badge.cy + 0.5);
   ctx.restore();
 }
+// A quiet rectangle (no handles, no delete badge) around whatever the pointer is resting on but
+// hasn't clicked yet — a low-key "this is clickable" cue, distinct from the dashed orange
+// selection ring so the two are never confused.
+function drawHoverOutline(ctx, a) {
+  const bb = getAnnotationBBox(a);
+  const p1 = toCanvasSpace({ x: bb.x1, y: bb.y1 }), p2 = toCanvasSpace({ x: bb.x2, y: bb.y2 });
+  ctx.save();
+  ctx.strokeStyle = 'rgba(211, 146, 60, 0.55)';   // accent (ink-400) at low opacity
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(Math.min(p1.x, p2.x), Math.min(p1.y, p2.y), Math.abs(p2.x - p1.x), Math.abs(p2.y - p1.y));
+  ctx.restore();
+}
 function applyTranslatedGeometry(a, orig, dx, dy) {
   switch (a.type) {
     case 'pen': case 'highlighter': a.points = orig.points.map((p) => ({ x: p.x + dx, y: p.y + dy })); break;
@@ -1562,6 +1593,41 @@ function deleteSelectedAnnotation() {
   pushHistory();
   removeAnnotationById(pageNum, id);
   setSelected(null);
+  scheduleAutosave();
+}
+// Clones the selected mark a few pixels down-right so the copy is visible as its own item,
+// selects the copy, and leaves the original untouched.
+function duplicateSelectedAnnotation() {
+  const a = getSelectedAnnotation();
+  if (!a) return;
+  const { pageNum } = App.selected;
+  pushHistory();
+  const copy = structuredClone(a);
+  copy.id = genId();
+  const off = 14 / App.scale;
+  switch (copy.type) {
+    case 'pen': case 'highlighter': copy.points = copy.points.map((p) => ({ x: p.x + off, y: p.y + off })); break;
+    case 'text': case 'image': copy.x += off; copy.y += off; break;
+    case 'curve':
+      copy.x1 += off; copy.y1 += off; copy.x2 += off; copy.y2 += off; copy.cx += off; copy.cy += off; break;
+    default: copy.x1 += off; copy.y1 += off; copy.x2 += off; copy.y2 += off;
+  }
+  App.pageAnnotations[pageNum].push(copy);
+  setSelected({ pageNum, id: copy.id });
+  requestRedraw(pageNum);
+  scheduleAutosave();
+}
+// Moves the selected mark to the top or bottom of its page's draw order (z-order).
+function reorderSelectedAnnotation(toFront) {
+  if (!App.selected) return;
+  const { pageNum, id } = App.selected;
+  const list = App.pageAnnotations[pageNum] || [];
+  const idx = list.findIndex((a) => a.id === id);
+  if (idx === -1 || (toFront && idx === list.length - 1) || (!toFront && idx === 0)) return;
+  pushHistory();
+  const [a] = list.splice(idx, 1);
+  if (toFront) list.push(a); else list.unshift(a);
+  requestRedraw(pageNum);
   scheduleAutosave();
 }
 function nudgeSelected(dx, dy) {
@@ -1650,6 +1716,57 @@ function finishSelectDrag(pageNum) {
   scheduleAutosave();
 }
 
+// Which resize cursor a selection handle should show, based on the direction from it to the
+// shape's other defining point — so a handle on, say, the bottom-left reads as nesw-resize
+// rather than every handle showing the same generic diagonal arrow.
+function handleCursor(sel, h) {
+  if (h.id === 'corner') return 'nwse-resize';               // image: bottom-right, aspect-locked
+  if (h.id === 'p3') return 'move';                           // curve's bend point: freely draggable
+  const other = sel.handles.find((x) => x.id !== h.id && x.id !== 'p3');
+  if (!other) return 'nwse-resize';
+  const dx = other.x - h.x, dy = other.y - h.y;
+  if (Math.abs(dx) < 4) return 'ns-resize';
+  if (Math.abs(dy) < 4) return 'ew-resize';
+  return dx * dy > 0 ? 'nwse-resize' : 'nesw-resize';
+}
+// Idle (no active gesture) hover pass for the Select tool: what cursor to show, and which
+// unselected mark — if any — to ring with a hover highlight so it reads as clickable before
+// the user commits to a click.
+function computeSelectHover(pageNum, pos) {
+  const sel = getSelectionGeometry(pageNum);
+  if (sel) {
+    if (dist(pos, { x: sel.badge.cx, y: sel.badge.cy }) <= sel.badge.r + 6) return { cursor: 'pointer', hoverId: null };
+    for (const h of sel.handles) { if (dist(pos, h) <= 13) return { cursor: handleCursor(sel, h), hoverId: null }; }
+    if (pos.x >= sel.rect.x1 - 6 && pos.x <= sel.rect.x2 + 6 && pos.y >= sel.rect.y1 - 6 && pos.y <= sel.rect.y2 + 6) {
+      return { cursor: 'move', hoverId: null };
+    }
+  }
+  const p = toPdfSpace(pos);
+  const list = App.pageAnnotations[pageNum] || [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (hitTestAnnotation(list[i], p, App.scale)) return { cursor: 'pointer', hoverId: list[i].id };
+  }
+  return { cursor: '', hoverId: null };
+}
+function handleIdleHover(e) {
+  const canvas = e.target instanceof Element ? e.target.closest('canvas.annotation-layer') : null;
+  if (!canvas) return;
+  const pageNum = +canvas.dataset.pageNum;
+  if (effectiveTool() !== 'select') {
+    canvas.style.cursor = '';
+    if (App.hover) { requestRedraw(App.hover.pageNum); App.hover = null; }
+    return;
+  }
+  const { cursor, hoverId } = computeSelectHover(pageNum, getPos(canvas, e));
+  canvas.style.cursor = cursor;
+  const prev = App.hover;
+  if ((prev ? prev.id : null) !== hoverId || (prev ? prev.pageNum : null) !== pageNum) {
+    if (prev) requestRedraw(prev.pageNum);
+    App.hover = hoverId ? { pageNum, id: hoverId } : null;
+    if (App.hover) requestRedraw(pageNum);
+  }
+}
+
 // =======================================================================
 // PAGE LAYOUT + LAZY RENDERING
 // Placeholders for every page are laid out up-front at the correct size; only
@@ -1674,6 +1791,10 @@ function redrawPageAnnotations(n) {
   }
   const g = App.gesture;
   if (g && g.kind === 'draw' && g.pageNum === n) drawAnnotation(ctx, g.shape, App.scale, n);
+  if (App.hover && App.hover.pageNum === n) {
+    const h = findAnnotation(n, App.hover.id);
+    if (h) drawHoverOutline(ctx, h);
+  }
   const sel = getSelectionGeometry(n);
   if (sel) drawSelectionOverlay(ctx, sel);
 }
@@ -1991,7 +2112,8 @@ function constrainShape(s) {
 function onPointerDown(e) {
   const canvas = e.target instanceof Element ? e.target.closest('canvas.annotation-layer') : null;
   if (!canvas || App.busy) return;
-  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  const isMiddleClick = e.pointerType === 'mouse' && e.button === 1;
+  if (e.pointerType === 'mouse' && e.button !== 0 && !isMiddleClick) return;
   if (App.gesture) return;                       // ignore extra fingers while one interaction is active
   const pageNum = +canvas.dataset.pageNum;
   const pos = getPos(canvas, e);
@@ -2004,7 +2126,12 @@ function onPointerDown(e) {
   };
   if (tool !== 'text') { closeTextEditor(true); viewportEl.focus({ preventScroll: true }); }
 
-  if (tool === 'hand') {
+  if (isMiddleClick) {
+    // Middle-click pans no matter which tool is active — saves switching to Pan just to
+    // reposition the page mid-draw, which is how most desktop editors handle the middle button.
+    document.body.classList.add('panning');
+    begin('pan', { sx: e.clientX, sy: e.clientY, sl: viewportEl.scrollLeft, st: viewportEl.scrollTop });
+  } else if (tool === 'hand') {
     if (e.pointerType === 'touch') return;       // touch pans natively (touch-action)
     document.body.classList.add('panning');
     begin('pan', { sx: e.clientX, sy: e.clientY, sl: viewportEl.scrollLeft, st: viewportEl.scrollTop });
@@ -2041,7 +2168,8 @@ function onPointerDown(e) {
 
 function onPointerMove(e) {
   const g = App.gesture;
-  if (!g || e.pointerId !== g.pointerId) return;
+  if (!g) { handleIdleHover(e); return; }         // no drag/pan in progress — just update cursor + hover ring
+  if (e.pointerId !== g.pointerId) return;
   const pos = getPos(g.canvas, e);
   if (g.kind === 'pan') {
     viewportEl.scrollLeft = g.sl - (e.clientX - g.sx);
@@ -2354,6 +2482,7 @@ function setTool(tool) {
   // and closing the popover leaves no toolbar button looking selected.
   btnMoreShapes.classList.toggle('active', shapesMenu.contains(document.querySelector(`.tool-btn[data-tool="${tool}"]`)));
   if (tool !== 'select' && App.selected) setSelected(null); else refreshControls();
+  if (tool !== 'select' && App.hover) { requestRedraw(App.hover.pageNum); App.hover = null; }
 }
 function beginStyleEdit() { if (!App.styleEditOpen) { pushHistory(); App.styleEditOpen = true; } }
 
@@ -2493,6 +2622,20 @@ function openShapesMenu() {
   shapesMenu.style.left = `${r.right + 8}px`;
   shapesMenu.classList.remove('hidden');
   btnMoreShapes.setAttribute('aria-expanded', 'true');
+}
+
+// =======================================================================
+// RIGHT-CLICK CONTEXT MENU (any mark, any tool — positioned at the click point)
+// =======================================================================
+const annotContextMenu = $('annotContextMenu');
+let contextMenuTarget = null;   // {pageNum, id} of the mark the open menu applies to
+function closeContextMenu() { annotContextMenu.classList.add('hidden'); contextMenuTarget = null; }
+function openContextMenuAt(clientX, clientY, target) {
+  contextMenuTarget = target;
+  annotContextMenu.classList.remove('hidden');
+  const r = annotContextMenu.getBoundingClientRect();
+  annotContextMenu.style.left = `${Math.min(clientX, window.innerWidth - r.width - 8)}px`;
+  annotContextMenu.style.top = `${Math.min(clientY, window.innerHeight - r.height - 8)}px`;
 }
 
 // =======================================================================
@@ -2792,6 +2935,8 @@ const helpModal = $('helpModal');
     ['A', 'Arrow'], ['L', 'Line'], ['R', 'Rectangle'], ['C', 'Circle'], ['T', 'Text box'], ['N', 'Comment pin'],
     ['S', 'Signature'], ['E', 'Eraser'], ['Shift', 'Snap angle / make square while drawing'],
     ['Del', 'Delete selected item'], ['Arrows', 'Nudge selected item (Shift = 10×)'], ['Enter', 'Edit selected text'],
+    ['Ctrl+D', 'Duplicate selected item'], ['Ctrl+]', 'Bring selected item to front'], ['Ctrl+[', 'Send selected item to back'],
+    ['Right-click', 'Duplicate / reorder / delete menu'], ['Middle-drag', 'Pan (any tool)'],
     ['Ctrl+Z', 'Undo'], ['Ctrl+Shift+Z', 'Redo'], ['Ctrl+S', 'Export annotated PDF'], ['Esc', 'Deselect / cancel / close'],
     ['+ / -', 'Zoom in / out (Ctrl + scroll works too)'], ['0', 'Reset zoom'], ['?', 'This panel']
   ];
@@ -2821,6 +2966,7 @@ window.addEventListener('keydown', (e) => {
     if (!signatureModal.classList.contains('hidden')) { closeSignatureModal(); return; }
     if (!addCommentModal.classList.contains('hidden')) { closeAddCommentModal(); return; }
     if (!helpModal.classList.contains('hidden')) { closeHelpModal(); return; }
+    if (!annotContextMenu.classList.contains('hidden')) { closeContextMenu(); return; }
     closeExportMenu();
     closeShapesMenu();
     if (App.gesture && App.gesture.kind === 'draw') { const pn = App.gesture.pageNum; App.gesture = null; requestRedraw(pn); }
@@ -2829,7 +2975,7 @@ window.addEventListener('keydown', (e) => {
   }
   const tag = e.target.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable) return;
-  if (anyModalOpen()) return;
+  if (anyModalOpen() || !annotContextMenu.classList.contains('hidden')) return;
 
   const key = e.key.toLowerCase();
   const mod = e.ctrlKey || e.metaKey;
@@ -2837,6 +2983,8 @@ window.addEventListener('keydown', (e) => {
   if (mod && key === 's') { e.preventDefault(); exportAnnotatedPdf(); return; }
   if (mod && key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }
   if (mod && (key === 'y' || (key === 'z' && e.shiftKey))) { e.preventDefault(); redo(); return; }
+  if (mod && key === 'd' && App.selected) { e.preventDefault(); duplicateSelectedAnnotation(); return; }
+  if (mod && (key === ']' || key === '[') && App.selected) { e.preventDefault(); reorderSelectedAnnotation(key === ']'); return; }
   if (mod || e.altKey) return;
 
   if (e.code === 'Space' && tag !== 'BUTTON') {
@@ -2899,6 +3047,41 @@ shapesMenu.addEventListener('click', (e) => e.stopPropagation());
 document.addEventListener('click', closeShapesMenu);
 window.addEventListener('resize', closeShapesMenu);
 viewportEl.addEventListener('scroll', closeShapesMenu, { passive: true });
+
+pagesContainer.addEventListener('contextmenu', (e) => {
+  const canvas = e.target instanceof Element ? e.target.closest('canvas.annotation-layer') : null;
+  if (!canvas || App.busy || App.gesture) return;
+  const pageNum = +canvas.dataset.pageNum;
+  const p = toPdfSpace(getPos(canvas, e));
+  const list = App.pageAnnotations[pageNum] || [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (!hitTestAnnotation(list[i], p, App.scale)) continue;
+    e.preventDefault();
+    closeExportMenu(); closeShapesMenu();
+    setSelected({ pageNum, id: list[i].id });
+    openContextMenuAt(e.clientX, e.clientY, { pageNum, id: list[i].id });
+    return;
+  }
+  closeContextMenu();   // right-clicking empty space keeps the browser's own menu
+});
+annotContextMenu.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const btn = e.target.closest('button[data-action]');
+  if (!btn || !contextMenuTarget) return;
+  const { pageNum, id } = contextMenuTarget;
+  if (!App.selected || App.selected.pageNum !== pageNum || App.selected.id !== id) setSelected({ pageNum, id });
+  const action = btn.dataset.action;
+  if (action === 'duplicate') duplicateSelectedAnnotation();
+  else if (action === 'front') reorderSelectedAnnotation(true);
+  else if (action === 'back') reorderSelectedAnnotation(false);
+  else if (action === 'delete') deleteSelectedAnnotation();
+  closeContextMenu();
+});
+document.addEventListener('click', closeContextMenu);
+document.addEventListener('contextmenu', (e) => { if (!pagesContainer.contains(e.target)) closeContextMenu(); });
+window.addEventListener('resize', closeContextMenu);
+window.addEventListener('blur', closeContextMenu);
+viewportEl.addEventListener('scroll', closeContextMenu, { passive: true });
 
 // Buttons that change text style while the inline editor is focused must not steal focus —
 // stealing focus would blur (and thus commit/close) the editor before the style even applies.
