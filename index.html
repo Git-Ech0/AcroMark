@@ -995,6 +995,8 @@ const textStyleControls = $('textStyleControls');
 const textStyleDivider = $('textStyleDivider');
 const opacitySlider = $('opacitySlider');
 const opacityValueLabel = $('opacityValueLabel');
+const colorPaletteEl = $('colorPalette');
+const customColorPicker = $('customColorPicker');
 const btnUndo = $('btnUndo');
 const btnRedo = $('btnRedo');
 const fileInputEl = $('fileInput');
@@ -2531,6 +2533,11 @@ function syncTextStyleButtons() {
 }
 function refreshControls() {
   const sel = getSelectedAnnotation();
+  // Keep the palette + custom swatch in sync with whatever is actually selected, so the picker
+  // never shows a stale colour left over from the last thing you drew.
+  const currentColor = activeTextEditor ? activeTextEditor.getStyle().color : (sel && sel.color) ? sel.color : App.color;
+  colorPaletteEl.querySelectorAll('.swatch').forEach((b) => b.classList.toggle('active', b.dataset.color === currentColor));
+  customColorPicker.value = currentColor;
   let mode = 'stroke';
   if (sel) mode = sel.type === 'text' ? 'text' : sel.type === 'highlighter' ? 'highlighter' : sel.type === 'image' ? 'none' : 'stroke';
   else if (App.activeTool === 'text') mode = 'text';
