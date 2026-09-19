@@ -179,10 +179,12 @@
 
     /* ---------- inline text editor ---------- */
     .text-editor {
-      position: absolute; z-index: 30; padding: 4px 6px; border: 1px solid #d3923c; border-radius: 4px;
-      background: rgb(var(--surface) / 0.96); color: rgb(var(--fg)); resize: none; overflow: hidden;
-      white-space: pre; outline: none; box-shadow: 0 8px 26px rgb(0 0 0 / 0.28); font-weight: 700;
+      position: absolute; z-index: 30; padding: 3px 5px; border: 1.5px dashed rgb(var(--accent) / 0.85); border-radius: 3px;
+      background: rgb(var(--surface) / 0.9); resize: none; overflow: hidden;
+      white-space: pre; outline: none; box-shadow: 0 6px 18px rgb(0 0 0 / 0.22), 0 0 0 4px rgb(var(--accent) / 0.08);
+      caret-color: rgb(var(--accent)); transition: box-shadow 0.12s ease;
     }
+    .text-editor:focus { box-shadow: 0 6px 20px rgb(0 0 0 / 0.26), 0 0 0 4px rgb(var(--accent) / 0.14); }
 
     /* ---------- toolbar bits ---------- */
     .tool-btn { padding: 0.625rem; border-radius: 0.75rem; color: rgb(var(--muted)); transition: background 0.12s, color 0.12s; }
@@ -316,6 +318,26 @@
       <span class="text-muted font-medium">Opacity:</span>
       <input type="range" id="opacitySlider" min="10" max="80" value="35" class="w-20 accent-[#d3923c] cursor-pointer" aria-label="Highlighter opacity" />
       <span id="opacityValueLabel" class="w-9 text-center">35%</span>
+    </div>
+
+    <div id="textStyleDivider" class="hidden h-4 w-[1px] bg-hairline shrink-0"></div>
+
+    <div id="textStyleControls" class="hidden items-center gap-3 shrink-0">
+      <div class="flex items-center gap-1" role="group" aria-label="Font family">
+        <button type="button" class="seg" data-font-family="helvetica" style="font-family: Helvetica, Arial, sans-serif;" title="Sans-serif (Helvetica)" aria-pressed="false">Sans</button>
+        <button type="button" class="seg" data-font-family="times" style="font-family: 'Times New Roman', Times, serif;" title="Serif (Times)" aria-pressed="false">Serif</button>
+        <button type="button" class="seg" data-font-family="courier" style="font-family: 'Courier New', Courier, monospace;" title="Monospace (Courier)" aria-pressed="false">Mono</button>
+      </div>
+      <div class="flex items-center gap-0.5" role="group" aria-label="Text style">
+        <button type="button" id="btnTextBold" class="tool-btn" data-text-style="bold" title="Bold" aria-pressed="false"><i data-lucide="bold" class="w-4 h-4"></i></button>
+        <button type="button" id="btnTextItalic" class="tool-btn" data-text-style="italic" title="Italic" aria-pressed="false"><i data-lucide="italic" class="w-4 h-4"></i></button>
+        <button type="button" id="btnTextUnderline" class="tool-btn" data-text-style="underline" title="Underline" aria-pressed="false"><i data-lucide="underline" class="w-4 h-4"></i></button>
+      </div>
+      <div class="flex items-center gap-0.5" role="group" aria-label="Text alignment">
+        <button type="button" class="tool-btn" data-text-align="left" title="Align left" aria-pressed="false"><i data-lucide="align-left" class="w-4 h-4"></i></button>
+        <button type="button" class="tool-btn" data-text-align="center" title="Align center" aria-pressed="false"><i data-lucide="align-center" class="w-4 h-4"></i></button>
+        <button type="button" class="tool-btn" data-text-align="right" title="Align right" aria-pressed="false"><i data-lucide="align-right" class="w-4 h-4"></i></button>
+      </div>
     </div>
 
     <div class="h-4 w-[1px] bg-hairline shrink-0"></div>
@@ -563,7 +585,20 @@ async function buildAnnotatedPdf(opts) {
     }
     throw err;
   }
-  const font = await doc.embedFont(StandardFonts.HelveticaBold);
+  const font = await doc.embedFont(StandardFonts.HelveticaBold);   // comment badges only
+  const STD_FONT_MAP = {
+    helvetica: { r: 'Helvetica', b: 'HelveticaBold', i: 'HelveticaOblique', bi: 'HelveticaBoldOblique' },
+    times: { r: 'TimesRoman', b: 'TimesRomanBold', i: 'TimesRomanItalic', bi: 'TimesRomanBoldItalic' },
+    courier: { r: 'Courier', b: 'CourierBold', i: 'CourierOblique', bi: 'CourierBoldOblique' }
+  };
+  const fontCache = {};
+  async function resolveFont(a) {
+    const fam = STD_FONT_MAP[a.fontFamily] || STD_FONT_MAP.helvetica;
+    const key = a.bold && a.italic ? 'bi' : a.bold ? 'b' : a.italic ? 'i' : 'r';
+    const stdName = fam[key];
+    if (!fontCache[stdName]) fontCache[stdName] = await doc.embedFont(StandardFonts[stdName]);
+    return fontCache[stdName];
+  }
   const pages = doc.getPages();
   const f = (v) => String(Math.round(v * 1000) / 1000 || 0);
   const color01 = (hex) => {
@@ -644,14 +679,25 @@ async function buildAnnotatedPdf(opts) {
             break;
           }
           case 'text': {
+            const txtFont = await resolveFont(a);
             const lines = String(a.text).split('\n');
             let encodable = true;
-            try { for (const ln of lines) font.widthOfTextAtSize(ln, a.fontSize); } catch (e) { encodable = false; }
+            try { for (const ln of lines) txtFont.widthOfTextAtSize(ln, a.fontSize); } catch (e) { encodable = false; }
             if (encodable) {
+              const widths = lines.map((ln) => txtFont.widthOfTextAtSize(ln, a.fontSize));
+              const maxW = Math.max(0, ...widths);
+              const align = a.align || 'left';
               lines.forEach((ln, i) => {
                 if (!ln) return;
-                const p = P(a.x, a.y + i * a.fontSize * LINE_H);
-                page.drawText(ln, { x: p.x, y: p.y, size: a.fontSize, font, color, rotate: degrees(rot) });
+                const dx = align === 'center' ? (maxW - widths[i]) / 2 : align === 'right' ? (maxW - widths[i]) : 0;
+                const lineY = a.y + i * a.fontSize * LINE_H;
+                const p = P(a.x + dx, lineY);
+                page.drawText(ln, { x: p.x, y: p.y, size: a.fontSize, font: txtFont, color, rotate: degrees(rot) });
+                if (a.underline) {
+                  const uy = lineY + a.fontSize * 0.12;
+                  const u1 = P(a.x + dx, uy), u2 = P(a.x + dx + widths[i], uy);
+                  page.drawLine({ start: u1, end: u2, thickness: Math.max(0.6, a.fontSize * 0.055), color, lineCap: LineCapStyle.Round });
+                }
               });
             } else if (rasterize) {
               const r = await rasterize(a);
@@ -708,7 +754,20 @@ async function buildAnnotatedPdf(opts) {
 // =======================================================================
 // CONSTANTS, STATE, HELPERS
 // =======================================================================
-const TEXT_FONT = 'Helvetica, Arial, "Liberation Sans", sans-serif';
+// Three screen-safe families, each mapped straight onto a PDF standard-14 font family below —
+// what you see while marking up is what the exported PDF actually contains.
+const FONT_FAMILY_CSS = {
+  helvetica: 'Helvetica, Arial, "Liberation Sans", sans-serif',
+  times: '"Times New Roman", Times, Georgia, serif',
+  courier: '"Courier New", Courier, monospace'
+};
+const FONT_FAMILIES = Object.keys(FONT_FAMILY_CSS);
+const TEXT_ALIGNS = ['left', 'center', 'right'];
+const TEXT_STYLE_KEYS = ['color', 'fontSize', 'fontFamily', 'bold', 'italic', 'underline', 'align'];
+function textFontCss(a) { return FONT_FAMILY_CSS[a.fontFamily] || FONT_FAMILY_CSS.helvetica; }
+function canvasFontString(a, px) {
+  return `${a.italic ? 'italic ' : ''}${a.bold === false ? 400 : 700} ${Math.max(1, px)}px ${textFontCss(a)}`;
+}
 const HEX_RE = /^#[0-9a-f]{6}$/i;
 const ZOOM_LEVELS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4];
 const MAX_CANVAS_PIXELS = 7e6;   // keeps big pages inside mobile canvas limits
@@ -729,6 +788,7 @@ const App = {
 
   activeTool: 'pen', spaceHeld: false,
   color: '#ef4444', strokeWidth: 3, highlighterWidth: 18, highlighterOpacity: 0.35, fontSize: 16,
+  fontFamily: 'helvetica', bold: true, italic: false, underline: false, align: 'left',
 
   pageAnnotations: {},                 // n -> [annotation]  (geometry in document units = scale 1)
   comments: [],                        // {id, pageNum, x, y, text, createdAt}
@@ -781,6 +841,8 @@ const sizeSlider = $('sizeSlider');
 const sizeLabel = $('sizeLabel');
 const sizeValueLabel = $('sizeValueLabel');
 const opacityControl = $('opacityControl');
+const textStyleControls = $('textStyleControls');
+const textStyleDivider = $('textStyleDivider');
 const opacitySlider = $('opacitySlider');
 const opacityValueLabel = $('opacityValueLabel');
 const btnUndo = $('btnUndo');
@@ -941,7 +1003,15 @@ function sanitizeAnnotation(raw) {
     }
     case 'text': {
       if (typeof raw.text !== 'string' || !raw.text.trim() || !isNum(raw.x) || !isNum(raw.y)) return null;
-      return { id, type: 'text', color, text: raw.text.slice(0, 2000), x: raw.x, y: raw.y, fontSize: numOr(raw.fontSize, 4, 300, 16) };
+      return {
+        id, type: 'text', color, text: raw.text.slice(0, 2000), x: raw.x, y: raw.y,
+        fontSize: numOr(raw.fontSize, 4, 300, 16),
+        fontFamily: FONT_FAMILIES.includes(raw.fontFamily) ? raw.fontFamily : 'helvetica',
+        bold: typeof raw.bold === 'boolean' ? raw.bold : true,
+        italic: !!raw.italic,
+        underline: !!raw.underline,
+        align: TEXT_ALIGNS.includes(raw.align) ? raw.align : 'left'
+      };
     }
     case 'image': {
       if (typeof raw.dataUrl !== 'string' || raw.dataUrl.length > 4e6) return null;
@@ -1121,12 +1191,30 @@ function drawAnnotation(ctx, a, s, pageNum) {
       ctx.ellipse((a.x1 + a.x2) / 2 * s, (a.y1 + a.y2) / 2 * s, Math.max(0.01, Math.abs(a.x2 - a.x1) / 2 * s), Math.max(0.01, Math.abs(a.y2 - a.y1) / 2 * s), 0, 0, Math.PI * 2);
       ctx.stroke();
       break;
-    case 'text':
+    case 'text': {
       ctx.fillStyle = a.color;
-      ctx.font = `700 ${Math.max(1, a.fontSize * s)}px ${TEXT_FONT}`;
+      ctx.font = canvasFontString(a, a.fontSize * s);
       ctx.textBaseline = 'alphabetic';
-      String(a.text).split('\n').forEach((ln, i) => ctx.fillText(ln, a.x * s, (a.y + i * a.fontSize * LINE_H) * s));
+      const m = measureTextLines(a);
+      const align = a.align || 'left';
+      m.lines.forEach((ln, i) => {
+        if (!ln) return;
+        const dx = align === 'center' ? (m.maxW - m.widths[i]) / 2 : align === 'right' ? (m.maxW - m.widths[i]) : 0;
+        const lx = (a.x + dx) * s, ly = (a.y + i * a.fontSize * LINE_H) * s;
+        ctx.fillText(ln, lx, ly);
+        if (a.underline) {
+          ctx.save();
+          ctx.strokeStyle = a.color;
+          ctx.lineWidth = Math.max(1, a.fontSize * s * 0.06);
+          ctx.beginPath();
+          const uy = ly + a.fontSize * s * 0.12;
+          ctx.moveTo(lx, uy); ctx.lineTo(lx + m.widths[i] * s, uy);
+          ctx.stroke();
+          ctx.restore();
+        }
+      });
       break;
+    }
     case 'image': {
       const img = getCachedImage(a, pageNum);
       if (img && img.complete && img.naturalWidth) ctx.drawImage(img, a.x * s, a.y * s, a.width * s, a.height * s);
@@ -1137,12 +1225,18 @@ function drawAnnotation(ctx, a, s, pageNum) {
 }
 
 // ---- bounding boxes (document units) & hit testing ----
-function textMetrics(a) {
-  measureCtx.font = `700 100px ${TEXT_FONT}`;
+// Measures every line at a fixed 100px reference size (cheap, cached font string) then scales
+// down to the annotation's real font size — one measurement pass covers width, alignment offsets
+// and the bounding box together.
+function measureTextLines(a) {
+  measureCtx.font = canvasFontString(a, 100);
   const lines = String(a.text).split('\n');
-  let w = 0;
-  for (const l of lines) w = Math.max(w, measureCtx.measureText(l).width);
-  return { w: w * a.fontSize / 100, lines: lines.length };
+  const widths = lines.map((l) => measureCtx.measureText(l).width * a.fontSize / 100);
+  return { lines, widths, maxW: Math.max(0, ...widths) };
+}
+function textMetrics(a) {
+  const m = measureTextLines(a);
+  return { w: m.maxW, lines: m.lines.length };
 }
 function getAnnotationBBox(a) {
   switch (a.type) {
@@ -1825,23 +1919,39 @@ function openTextEditor(pageNum, pdfPos, existing) {
   const box = App.pageBoxes[pageNum];
   if (!box) return;
   const at = existing ? { x: existing.x, y: existing.y } : pdfPos;
-  const fs = existing ? existing.fontSize : App.fontSize;
-  const fontPx = Math.max(16, fs * App.scale);
+  // local, uncommitted style — every control (color, font, bold/italic/underline, align, size)
+  // previews live in the editor here and only lands on the real annotation when we commit below,
+  // exactly like the text content itself (Escape discards style changes too, not just typing).
+  const style = existing
+    ? {
+        color: existing.color, fontSize: existing.fontSize, fontFamily: existing.fontFamily || 'helvetica',
+        bold: existing.bold !== false, italic: !!existing.italic, underline: !!existing.underline, align: existing.align || 'left'
+      }
+    : { color: App.color, fontSize: App.fontSize, fontFamily: App.fontFamily, bold: App.bold, italic: App.italic, underline: App.underline, align: App.align };
+  const original = { ...style };
+
   const ta = document.createElement('textarea');
   ta.className = 'text-editor';
   ta.wrap = 'off'; ta.spellcheck = false; ta.rows = 1;
   ta.placeholder = 'Type text…';
   ta.setAttribute('aria-label', 'Text annotation');
   ta.value = existing ? existing.text : '';
-  ta.style.fontFamily = TEXT_FONT;
-  ta.style.fontSize = `${fontPx}px`;
-  ta.style.lineHeight = String(LINE_H);
-  // align the editor's first baseline with where the annotation will be drawn
   ta.style.left = `${at.x * App.scale - 7}px`;
-  ta.style.top = `${at.y * App.scale - 5 - 0.97 * fontPx}px`;
+
   const fit = () => {
+    const fontPx = Math.max(16, style.fontSize * App.scale);
+    ta.style.fontFamily = textFontCss(style);
+    ta.style.fontWeight = style.bold ? '700' : '400';
+    ta.style.fontStyle = style.italic ? 'italic' : 'normal';
+    ta.style.textDecoration = style.underline ? 'underline' : 'none';
+    ta.style.textAlign = style.align;
+    ta.style.color = style.color;
+    ta.style.fontSize = `${fontPx}px`;
+    ta.style.lineHeight = String(LINE_H);
+    // align the editor's first baseline with where the annotation will be drawn
+    ta.style.top = `${at.y * App.scale - 5 - 0.97 * fontPx}px`;
     const lines = ta.value.split('\n');
-    measureCtx.font = `700 ${fontPx}px ${TEXT_FONT}`;
+    measureCtx.font = canvasFontString(style, fontPx);
     let w = 0;
     for (const l of lines) w = Math.max(w, measureCtx.measureText(l).width);
     ta.style.width = `${Math.max(150, w + 30)}px`;
@@ -1853,23 +1963,28 @@ function openTextEditor(pageNum, pdfPos, existing) {
 
   let done = false;
   const api = {
+    getStyle() { return { ...style }; },
+    setStyle(patch) { Object.assign(style, patch); fit(); },
     finish(commit) {
       if (done) return;
       done = true; activeTextEditor = null;
       const val = ta.value.replace(/\s+$/, '');
       ta.remove();
       if (!commit) return;
+      const styleChanged = TEXT_STYLE_KEYS.some((k) => style[k] !== original[k]);
       if (existing) {
         if (!val.trim()) {
           pushHistory(); removeAnnotationById(pageNum, existing.id);
           if (App.selected && App.selected.id === existing.id) App.selected = null;
-        } else if (val !== existing.text) {
-          pushHistory(); existing.text = val;
+        } else if (val !== existing.text || styleChanged) {
+          pushHistory();
+          existing.text = val;
+          Object.assign(existing, style);
         } else return;
       } else {
         if (!val.trim()) return;
         pushHistory();
-        App.pageAnnotations[pageNum].push({ id: genId(), type: 'text', text: val, x: at.x, y: at.y, color: App.color, fontSize: fs });
+        App.pageAnnotations[pageNum].push({ id: genId(), type: 'text', text: val, x: at.x, y: at.y, ...style });
       }
       requestRedraw(pageNum);
       scheduleAutosave();
@@ -1879,10 +1994,18 @@ function openTextEditor(pageNum, pdfPos, existing) {
   ta.addEventListener('input', fit);
   ta.addEventListener('keydown', (e) => {
     e.stopPropagation();
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && !e.shiftKey && !e.altKey) {
+      const k = e.key.toLowerCase();
+      if (k === 'b') { e.preventDefault(); api.setStyle({ bold: !style.bold }); syncTextStyleButtons(); return; }
+      if (k === 'i') { e.preventDefault(); api.setStyle({ italic: !style.italic }); syncTextStyleButtons(); return; }
+      if (k === 'u') { e.preventDefault(); api.setStyle({ underline: !style.underline }); syncTextStyleButtons(); return; }
+    }
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); api.finish(true); }
     else if (e.key === 'Escape') { e.preventDefault(); api.finish(false); }
   });
   ta.addEventListener('blur', () => api.finish(true));
+  refreshControls();
 }
 
 // =======================================================================
@@ -2020,6 +2143,50 @@ function setTool(tool) {
   if (tool !== 'select' && App.selected) setSelected(null); else refreshControls();
 }
 function beginStyleEdit() { if (!App.styleEditOpen) { pushHistory(); App.styleEditOpen = true; } }
+
+// Resolves the text style that the controls should currently show: the live editor's pending
+// style while one is open, otherwise a selected text annotation's own style, otherwise the
+// defaults new text will be created with.
+function currentTextStyle() {
+  if (activeTextEditor) return activeTextEditor.getStyle();
+  const sel = getSelectedAnnotation();
+  if (sel && sel.type === 'text') {
+    return {
+      color: sel.color, fontSize: sel.fontSize, fontFamily: sel.fontFamily || 'helvetica',
+      bold: sel.bold !== false, italic: !!sel.italic, underline: !!sel.underline, align: sel.align || 'left'
+    };
+  }
+  return { color: App.color, fontSize: App.fontSize, fontFamily: App.fontFamily, bold: App.bold, italic: App.italic, underline: App.underline, align: App.align };
+}
+// Routes a text-style change (font family, bold/italic/underline, alignment) to wherever it
+// belongs: the open editor if one is active, a selected text annotation, or the app defaults.
+function applyTextStyle(patch) {
+  if (activeTextEditor) { activeTextEditor.setStyle(patch); syncTextStyleButtons(); return; }
+  const sel = getSelectedAnnotation();
+  if (sel && sel.type === 'text') {
+    beginStyleEdit();
+    Object.assign(sel, patch);
+    requestRedraw(App.selected.pageNum);
+    scheduleAutosave();
+  } else {
+    Object.assign(App, patch);
+  }
+  syncTextStyleButtons();
+}
+function syncTextStyleButtons() {
+  const st = currentTextStyle();
+  document.querySelectorAll('#textStyleControls [data-font-family]').forEach((b) => {
+    const on = b.dataset.fontFamily === st.fontFamily;
+    b.classList.toggle('active', on); b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  [['btnTextBold', st.bold], ['btnTextItalic', st.italic], ['btnTextUnderline', st.underline]].forEach(([id, on]) => {
+    $(id).classList.toggle('active', !!on); $(id).setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  document.querySelectorAll('#textStyleControls [data-text-align]').forEach((b) => {
+    const on = b.dataset.textAlign === st.align;
+    b.classList.toggle('active', on); b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
 function refreshControls() {
   const sel = getSelectedAnnotation();
   let mode = 'stroke';
@@ -2027,7 +2194,7 @@ function refreshControls() {
   else if (App.activeTool === 'text') mode = 'text';
   else if (App.activeTool === 'highlighter') mode = 'highlighter';
   let min, max, val, label;
-  if (mode === 'text') { label = 'Font Size:'; min = 8; max = 72; val = sel ? sel.fontSize : App.fontSize; }
+  if (mode === 'text') { label = 'Font Size:'; min = 8; max = 72; val = currentTextStyle().fontSize; }
   else if (mode === 'highlighter') { label = 'Highlighter Size:'; min = 6; max = 40; val = sel ? sel.width : App.highlighterWidth; }
   else { label = mode === 'none' ? 'Resize with the corner handle' : 'Stroke Size:'; min = 1; max = 25; val = sel && mode !== 'none' ? sel.width : App.strokeWidth; }
   sizeLabel.textContent = label;
@@ -2043,10 +2210,16 @@ function refreshControls() {
     opacitySlider.value = Math.round(o * 100);
     opacityValueLabel.textContent = `${Math.round(o * 100)}%`;
   }
+  const showText = mode === 'text';
+  textStyleControls.classList.toggle('hidden', !showText);
+  textStyleControls.classList.toggle('flex', showText);
+  textStyleDivider.classList.toggle('hidden', !showText);
+  if (showText) syncTextStyleButtons();
 }
 function setColor(hex) {
-  App.color = hex;
   document.querySelectorAll('#colorPalette .swatch').forEach((b) => b.classList.toggle('active', b.dataset.color === hex));
+  if (activeTextEditor) { App.color = hex; activeTextEditor.setStyle({ color: hex }); return; }
+  App.color = hex;
   const sel = getSelectedAnnotation();
   if (sel && sel.type !== 'image') {
     beginStyleEdit();
@@ -2485,6 +2658,12 @@ viewportEl.addEventListener('wheel', (e) => {
 document.querySelectorAll('.tool-btn[data-tool]').forEach((btn) => btn.addEventListener('click', () => setTool(btn.dataset.tool)));
 $('btnOpenSignature').addEventListener('click', openSignatureModal);
 
+// Buttons that change text style while the inline editor is focused must not steal focus —
+// stealing focus would blur (and thus commit/close) the editor before the style even applies.
+// Preventing the mousedown's default focus-shift keeps the textarea focused; the click still fires.
+function preventFocusSteal(el) { el.addEventListener('mousedown', (e) => e.preventDefault()); }
+document.querySelectorAll('#colorPalette .swatch, #textStyleControls button').forEach(preventFocusSteal);
+
 document.querySelectorAll('#colorPalette .swatch').forEach((btn) => btn.addEventListener('click', () => {
   App.styleEditOpen = false;
   $('customColorPicker').value = btn.dataset.color;
@@ -2493,9 +2672,20 @@ document.querySelectorAll('#colorPalette .swatch').forEach((btn) => btn.addEvent
 $('customColorPicker').addEventListener('input', (e) => setColor(e.target.value));
 $('customColorPicker').addEventListener('change', () => { App.styleEditOpen = false; });
 
+document.querySelectorAll('#textStyleControls [data-font-family]').forEach((btn) => {
+  btn.addEventListener('click', () => applyTextStyle({ fontFamily: btn.dataset.fontFamily }));
+});
+$('btnTextBold').addEventListener('click', () => applyTextStyle({ bold: !currentTextStyle().bold }));
+$('btnTextItalic').addEventListener('click', () => applyTextStyle({ italic: !currentTextStyle().italic }));
+$('btnTextUnderline').addEventListener('click', () => applyTextStyle({ underline: !currentTextStyle().underline }));
+document.querySelectorAll('#textStyleControls [data-text-align]').forEach((btn) => {
+  btn.addEventListener('click', () => applyTextStyle({ align: btn.dataset.textAlign }));
+});
+
 sizeSlider.addEventListener('input', (e) => {
   const v = +e.target.value;
   sizeValueLabel.textContent = String(v);
+  if (activeTextEditor) { App.fontSize = v; activeTextEditor.setStyle({ fontSize: v }); return; }
   const sel = getSelectedAnnotation();
   if (sel && sel.type !== 'image') {
     beginStyleEdit();
