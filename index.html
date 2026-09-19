@@ -126,6 +126,11 @@
     a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible, [tabindex]:focus-visible {
       outline: 2px solid rgb(var(--accent)); outline-offset: 2px; border-radius: 6px;
     }
+    /* #viewport is focused programmatically (never via real Tab navigation, since tabindex="-1"
+       takes it out of the tab order) purely so keyboard shortcuts keep working after a toolbar
+       click or a draw/select interaction. That focus has no visible meaning to the user, so it
+       should never draw a ring — most noticeably wrapping the whole document — around itself. */
+    #viewport:focus, #viewport:focus-visible { outline: none; }
     ::selection { background: #d3923c; color: #17130d; }
     input, textarea, .selectable { -webkit-user-select: text; user-select: text; }
 
