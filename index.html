@@ -376,11 +376,24 @@
       <button data-tool="line" aria-label="Line" class="tool-btn" title="Line (L)"><i data-lucide="minus" class="w-5 h-5"></i></button>
       <button data-tool="rect" aria-label="Rectangle" class="tool-btn" title="Rectangle (R)"><i data-lucide="square" class="w-5 h-5"></i></button>
       <button data-tool="circle" aria-label="Circle" class="tool-btn" title="Circle (C)"><i data-lucide="circle" class="w-5 h-5"></i></button>
+      <button id="btnMoreShapes" aria-label="More shapes" class="tool-btn" title="More Shapes" aria-haspopup="true" aria-expanded="false"><i data-lucide="shapes" class="w-5 h-5"></i></button>
       <button data-tool="text" aria-label="Text box" class="tool-btn" title="Text Box (T)"><i data-lucide="type" class="w-5 h-5"></i></button>
       <button data-tool="comment" aria-label="Comment pin" class="tool-btn" title="Comment Pin (N)"><i data-lucide="message-square-plus" class="w-5 h-5"></i></button>
       <button id="btnOpenSignature" aria-label="Sign document" class="tool-btn" title="Sign Document (S)"><i data-lucide="signature" class="w-5 h-5"></i></button>
       <button data-tool="eraser" aria-label="Eraser" class="tool-btn" title="Eraser (E)"><i data-lucide="eraser" class="w-5 h-5"></i></button>
     </aside>
+
+    <!-- MORE-SHAPES POPOVER — positioned via JS (fixed) so the toolbar's own scroll clipping never cuts it off -->
+    <div id="shapesMenu" role="menu" aria-label="More shapes" class="hidden fixed z-40 bg-surface border border-hairline2 rounded-xl shadow-xl p-2 grid grid-cols-4 gap-1 w-[184px]">
+      <button type="button" data-tool="roundrect" class="tool-btn" title="Rounded Rectangle"><i data-lucide="squircle" class="w-5 h-5"></i></button>
+      <button type="button" data-tool="triangle" class="tool-btn" title="Triangle"><i data-lucide="triangle" class="w-5 h-5"></i></button>
+      <button type="button" data-tool="diamond" class="tool-btn" title="Diamond"><i data-lucide="diamond" class="w-5 h-5"></i></button>
+      <button type="button" data-tool="pentagon" class="tool-btn" title="Pentagon"><i data-lucide="pentagon" class="w-5 h-5"></i></button>
+      <button type="button" data-tool="hexagon" class="tool-btn" title="Hexagon"><i data-lucide="hexagon" class="w-5 h-5"></i></button>
+      <button type="button" data-tool="octagon" class="tool-btn" title="Octagon"><i data-lucide="octagon" class="w-5 h-5"></i></button>
+      <button type="button" data-tool="star" class="tool-btn" title="Star"><i data-lucide="star" class="w-5 h-5"></i></button>
+      <button type="button" data-tool="arrow2" class="tool-btn" title="Double-Headed Arrow"><i data-lucide="arrow-left-right" class="w-5 h-5"></i></button>
+    </div>
 
     <!-- PAGE THUMBNAILS RAIL -->
     <aside id="thumbnailsPanel" class="hidden w-[132px] border-r border-hairline bg-surface flex-col shrink-0 overflow-y-auto py-3 px-2.5 gap-2.5" aria-label="Page thumbnails">
@@ -560,6 +573,54 @@ function arrowGeometry(a) {
   };
 }
 
+// ---- shape library: every non-arrow, non-line shape is defined as a set of
+// points normalised to a 0..1 unit box, then mapped onto the annotation's
+// actual x1,y1 → x2,y2 bounding box at draw / export / hit-test time. This
+// keeps one source of truth for a shape's outline shared by the canvas
+// preview, the PDF export and hit-testing. ----
+function regularPolygonUnitPoints(sides, rotationDeg) {
+  const pts = [];
+  for (let i = 0; i < sides; i++) {
+    const ang = (rotationDeg + (360 * i) / sides) * Math.PI / 180;
+    pts.push([0.5 + 0.5 * Math.cos(ang), 0.5 + 0.5 * Math.sin(ang)]);
+  }
+  return pts;
+}
+function starUnitPoints(spikes, innerRatio, rotationDeg) {
+  const pts = [];
+  for (let i = 0; i < spikes * 2; i++) {
+    const ang = (rotationDeg + (180 * i) / spikes) * Math.PI / 180;
+    const r = i % 2 === 0 ? 0.5 : 0.5 * innerRatio;
+    pts.push([0.5 + r * Math.cos(ang), 0.5 + r * Math.sin(ang)]);
+  }
+  return pts;
+}
+const POLY_SHAPES = {
+  triangle: [[0.5, 0], [1, 1], [0, 1]],
+  diamond: [[0.5, 0], [1, 0.5], [0.5, 1], [0, 0.5]],
+  pentagon: regularPolygonUnitPoints(5, -90),
+  hexagon: regularPolygonUnitPoints(6, 0),
+  octagon: regularPolygonUnitPoints(8, 22.5),
+  star: starUnitPoints(5, 0.42, -90)
+};
+// Every shape tool that drags out an x1,y1 → x2,y2 box (outline-only, like rect/circle).
+const BOX_SHAPE_TYPES = new Set(['rect', 'roundrect', 'circle', 'triangle', 'diamond', 'pentagon', 'hexagon', 'octagon', 'star']);
+// Every shape tool that drags out a directional x1,y1 → x2,y2 segment (like line/arrow).
+const DIRECTIONAL_SHAPE_TYPES = new Set(['line', 'arrow', 'arrow2']);
+const SHAPE_TOOLS = [...DIRECTIONAL_SHAPE_TYPES, ...BOX_SHAPE_TYPES];
+// Maps an annotation's box onto its shape's unit-box points, in document units.
+function polygonPointsFor(a) {
+  const x1 = Math.min(a.x1, a.x2), x2 = Math.max(a.x1, a.x2);
+  const y1 = Math.min(a.y1, a.y2), y2 = Math.max(a.y1, a.y2);
+  const w = x2 - x1, h = y2 - y1;
+  return POLY_SHAPES[a.type].map(([nx, ny]) => ({ x: x1 + nx * w, y: y1 + ny * h }));
+}
+// Corner radius for a rounded rectangle, in document units — scales with the box but caps out
+// so a huge rectangle doesn't grow absurdly round corners.
+function roundRectRadius(a) {
+  return Math.min(30, Math.min(Math.abs(a.x2 - a.x1), Math.abs(a.y2 - a.y1)) * 0.25);
+}
+
 function bytesFromDataUrl(dataUrl) {
   const bin = atob(dataUrl.slice(dataUrl.indexOf(',') + 1));
   const out = new Uint8Array(bin.length);
@@ -616,6 +677,14 @@ async function buildAnnotatedPdf(opts) {
     const l = pts[pts.length - 1];
     return d + ` L ${f(l.x)} ${y(l.y)}`;
   };
+  // pts are already in page space (post-P transform); drawSvgPath expects an SVG-style
+  // (y-down) path anchored at 0,0, so each y is negated back, same convention as `polyline`.
+  const svgPolygonPts = (pts) => {
+    if (!pts.length) return '';
+    let d = `M ${f(pts[0].x)} ${f(-pts[0].y)}`;
+    for (let i = 1; i < pts.length; i++) d += ` L ${f(pts[i].x)} ${f(-pts[i].y)}`;
+    return d + ' Z';
+  };
 
   let skipped = 0;
   const total = Math.min(pages.length, pdfjsDoc.numPages);
@@ -633,6 +702,17 @@ async function buildAnnotatedPdf(opts) {
     const placeImage = (img, x1, y1, x2, y2) => {
       const o = P(x1, y2); // visual bottom-left corner
       page.drawImage(img, { x: o.x, y: o.y, width: x2 - x1, height: y2 - y1, rotate: degrees(rot) });
+    };
+    // Rounded-rect corners as quadratic Bezier curves, each control/end point run through P()
+    // individually — safe because P() (viewport→PDF) is affine, so it maps curves correctly too.
+    const roundRectPath = (x1, y1, x2, y2, r) => {
+      const xl = Math.min(x1, x2), xr = Math.max(x1, x2), yt = Math.min(y1, y2), yb = Math.max(y1, y2);
+      const rx = Math.min(r, (xr - xl) / 2), ry = Math.min(r, (yb - yt) / 2);
+      const pt = (x, y) => { const p = P(x, y); return `${f(p.x)} ${f(-p.y)}`; };
+      return `M ${pt(xl + rx, yt)} L ${pt(xr - rx, yt)} Q ${pt(xr, yt)} ${pt(xr, yt + ry)} ` +
+             `L ${pt(xr, yb - ry)} Q ${pt(xr, yb)} ${pt(xr - rx, yb)} ` +
+             `L ${pt(xl + rx, yb)} Q ${pt(xl, yb)} ${pt(xl, yb - ry)} ` +
+             `L ${pt(xl, yt + ry)} Q ${pt(xl, yt)} ${pt(xl + rx, yt)} Z`;
     };
 
     for (const a of list) {
@@ -660,6 +740,16 @@ async function buildAnnotatedPdf(opts) {
             page.drawSvgPath(`M ${f(t.x)} ${f(-t.y)} L ${f(l.x)} ${f(-l.y)} L ${f(r.x)} ${f(-r.y)} Z`, { x: 0, y: 0, color });
             break;
           }
+          case 'arrow2': {
+            const g1 = arrowGeometry({ x1: a.x2, y1: a.y2, x2: a.x1, y2: a.y1, width: a.width });
+            const g2 = arrowGeometry(a);
+            page.drawLine({ start: P(g1.shaftEnd.x, g1.shaftEnd.y), end: P(g2.shaftEnd.x, g2.shaftEnd.y), thickness: a.width, color, lineCap: LineCapStyle.Round });
+            for (const g of [g1, g2]) {
+              const t = P(g.tip.x, g.tip.y), l = P(g.left.x, g.left.y), r = P(g.right.x, g.right.y);
+              page.drawSvgPath(`M ${f(t.x)} ${f(-t.y)} L ${f(l.x)} ${f(-l.y)} L ${f(r.x)} ${f(-r.y)} Z`, { x: 0, y: 0, color });
+            }
+            break;
+          }
           case 'rect': {
             const c1 = P(a.x1, a.y1), c2 = P(a.x2, a.y2);
             page.drawRectangle({
@@ -667,6 +757,15 @@ async function buildAnnotatedPdf(opts) {
               width: Math.abs(c1.x - c2.x), height: Math.abs(c1.y - c2.y),
               borderColor: color, borderWidth: a.width
             });
+            break;
+          }
+          case 'roundrect': {
+            page.drawSvgPath(roundRectPath(a.x1, a.y1, a.x2, a.y2, roundRectRadius(a)), { x: 0, y: 0, borderColor: color, borderWidth: a.width });
+            break;
+          }
+          case 'triangle': case 'diamond': case 'pentagon': case 'hexagon': case 'octagon': case 'star': {
+            const pts = polygonPointsFor(a).map((pt) => P(pt.x, pt.y));
+            page.drawSvgPath(svgPolygonPts(pts), { x: 0, y: 0, borderColor: color, borderWidth: a.width });
             break;
           }
           case 'circle': {
@@ -976,7 +1075,7 @@ const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const numOr = (v, lo, hi, d) => (isNum(v) ? clamp(v, lo, hi) : d);
 
 function normalizeBox(a) {
-  if (a.type !== 'rect' && a.type !== 'circle') return;
+  if (!BOX_SHAPE_TYPES.has(a.type)) return;
   const x1 = Math.min(a.x1, a.x2), x2 = Math.max(a.x1, a.x2), y1 = Math.min(a.y1, a.y2), y2 = Math.max(a.y1, a.y2);
   a.x1 = x1; a.y1 = y1; a.x2 = x2; a.y2 = y2;
 }
@@ -995,7 +1094,8 @@ function sanitizeAnnotation(raw) {
         points: raw.points.map((p) => ({ x: p.x, y: p.y }))
       };
     }
-    case 'line': case 'arrow': case 'rect': case 'circle': {
+    case 'line': case 'arrow': case 'arrow2': case 'rect': case 'roundrect': case 'circle':
+    case 'triangle': case 'diamond': case 'pentagon': case 'hexagon': case 'octagon': case 'star': {
       if (![raw.x1, raw.y1, raw.x2, raw.y2].every(isNum)) return null;
       const a = { id, type: raw.type, color, width: numOr(raw.width, 0.25, 200, 3), x1: raw.x1, y1: raw.y1, x2: raw.x2, y2: raw.y2 };
       normalizeBox(a);
@@ -1181,16 +1281,43 @@ function drawAnnotation(ctx, a, s, pageNum) {
       ctx.beginPath(); ctx.moveTo(g.tip.x * s, g.tip.y * s); ctx.lineTo(g.left.x * s, g.left.y * s); ctx.lineTo(g.right.x * s, g.right.y * s); ctx.closePath(); ctx.fill();
       break;
     }
+    case 'arrow2': {
+      const g1 = arrowGeometry({ x1: a.x2, y1: a.y2, x2: a.x1, y2: a.y1, width: a.width });
+      const g2 = arrowGeometry(a);
+      ctx.strokeStyle = a.color; ctx.fillStyle = a.color; ctx.lineWidth = Math.max(0.5, a.width * s); ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(g1.shaftEnd.x * s, g1.shaftEnd.y * s); ctx.lineTo(g2.shaftEnd.x * s, g2.shaftEnd.y * s); ctx.stroke();
+      for (const g of [g1, g2]) {
+        ctx.beginPath(); ctx.moveTo(g.tip.x * s, g.tip.y * s); ctx.lineTo(g.left.x * s, g.left.y * s); ctx.lineTo(g.right.x * s, g.right.y * s); ctx.closePath(); ctx.fill();
+      }
+      break;
+    }
     case 'rect':
       ctx.strokeStyle = a.color; ctx.lineWidth = Math.max(0.5, a.width * s);
       ctx.strokeRect(Math.min(a.x1, a.x2) * s, Math.min(a.y1, a.y2) * s, Math.abs(a.x2 - a.x1) * s, Math.abs(a.y2 - a.y1) * s);
       break;
+    case 'roundrect': {
+      const x1 = Math.min(a.x1, a.x2) * s, y1 = Math.min(a.y1, a.y2) * s, x2 = Math.max(a.x1, a.x2) * s, y2 = Math.max(a.y1, a.y2) * s;
+      const r = roundRectRadius(a) * s;
+      ctx.strokeStyle = a.color; ctx.lineWidth = Math.max(0.5, a.width * s);
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(x1, y1, x2 - x1, y2 - y1, r); else ctx.rect(x1, y1, x2 - x1, y2 - y1);
+      ctx.stroke();
+      break;
+    }
     case 'circle':
       ctx.strokeStyle = a.color; ctx.lineWidth = Math.max(0.5, a.width * s);
       ctx.beginPath();
       ctx.ellipse((a.x1 + a.x2) / 2 * s, (a.y1 + a.y2) / 2 * s, Math.max(0.01, Math.abs(a.x2 - a.x1) / 2 * s), Math.max(0.01, Math.abs(a.y2 - a.y1) / 2 * s), 0, 0, Math.PI * 2);
       ctx.stroke();
       break;
+    case 'triangle': case 'diamond': case 'pentagon': case 'hexagon': case 'octagon': case 'star': {
+      const pts = polygonPointsFor(a);
+      ctx.strokeStyle = a.color; ctx.lineWidth = Math.max(0.5, a.width * s); ctx.lineJoin = 'round';
+      ctx.beginPath();
+      pts.forEach((p, i) => { const px = p.x * s, py = p.y * s; if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py); });
+      ctx.closePath(); ctx.stroke();
+      break;
+    }
     case 'text': {
       ctx.fillStyle = a.color;
       ctx.font = canvasFontString(a, a.fontSize * s);
@@ -1247,11 +1374,12 @@ function getAnnotationBBox(a) {
       const pad = (a.width || 1) / 2 + 4;
       return { x1: x1 - pad, y1: y1 - pad, x2: x2 + pad, y2: y2 + pad };
     }
-    case 'line': case 'arrow': {
+    case 'line': case 'arrow': case 'arrow2': {
       const pad = (a.width || 1) / 2 + 6;
       return { x1: Math.min(a.x1, a.x2) - pad, y1: Math.min(a.y1, a.y2) - pad, x2: Math.max(a.x1, a.x2) + pad, y2: Math.max(a.y1, a.y2) + pad };
     }
-    case 'rect': case 'circle': {
+    case 'rect': case 'roundrect': case 'circle':
+    case 'triangle': case 'diamond': case 'pentagon': case 'hexagon': case 'octagon': case 'star': {
       const pad = (a.width || 1) / 2 + 3;
       return { x1: Math.min(a.x1, a.x2) - pad, y1: Math.min(a.y1, a.y2) - pad, x2: Math.max(a.x1, a.x2) + pad, y2: Math.max(a.y1, a.y2) + pad };
     }
@@ -1276,9 +1404,9 @@ function hitTestAnnotation(a, p, scale) {
       if (a.points.length === 1) return dist(p, a.points[0]) <= tol;
       for (let i = 0; i < a.points.length - 1; i++) if (distToSegment(p, a.points[i], a.points[i + 1]) <= tol) return true;
       return false;
-    case 'line': case 'arrow':
+    case 'line': case 'arrow': case 'arrow2':
       return distToSegment(p, { x: a.x1, y: a.y1 }, { x: a.x2, y: a.y2 }) <= tol;
-    case 'rect': {   // outline only, so shapes drawn over other marks don't block them
+    case 'rect': case 'roundrect': {   // outline only, so shapes drawn over other marks don't block them
       const x1 = Math.min(a.x1, a.x2), x2 = Math.max(a.x1, a.x2), y1 = Math.min(a.y1, a.y2), y2 = Math.max(a.y1, a.y2);
       if (p.x < x1 - tol || p.x > x2 + tol || p.y < y1 - tol || p.y > y2 + tol) return false;
       return !(p.x > x1 + tol && p.x < x2 - tol && p.y > y1 + tol && p.y < y2 - tol);
@@ -1288,6 +1416,13 @@ function hitTestAnnotation(a, p, scale) {
       if (rx < 0.5 || ry < 0.5) return dist(p, { x: cx, y: cy }) <= tol + Math.max(rx, ry);
       const d = Math.hypot((p.x - cx) / rx, (p.y - cy) / ry);
       return Math.abs(d - 1) * Math.min(rx, ry) <= tol;
+    }
+    case 'triangle': case 'diamond': case 'pentagon': case 'hexagon': case 'octagon': case 'star': {   // near an edge only, same outline-only rule as rect
+      const pts = polygonPointsFor(a);
+      for (let i = 0; i < pts.length; i++) {
+        if (distToSegment(p, pts[i], pts[(i + 1) % pts.length]) <= tol) return true;
+      }
+      return false;
     }
     default: {
       const b = getAnnotationBBox(a);
@@ -1320,10 +1455,10 @@ function getSelectionGeometry(pageNum) {
   const size = pageCssSize(pageNum);
   const badge = { cx: clamp(rect.x2, 12, size.w - 12), cy: clamp(rect.y1, 12, size.h - 12), r: 10 };
   let handles = [];
-  if (a.type === 'line' || a.type === 'arrow') {
+  if (DIRECTIONAL_SHAPE_TYPES.has(a.type)) {
     const h1 = toCanvasSpace({ x: a.x1, y: a.y1 }), h2 = toCanvasSpace({ x: a.x2, y: a.y2 });
     handles = [{ id: 'p1', x: h1.x, y: h1.y }, { id: 'p2', x: h2.x, y: h2.y }];
-  } else if (a.type === 'rect' || a.type === 'circle' || a.type === 'image') {
+  } else if (BOX_SHAPE_TYPES.has(a.type) || a.type === 'image') {
     handles = [{ id: 'corner', x: rect.x2, y: rect.y2 }];
   }
   return { a, rect, badge, handles };
@@ -1346,7 +1481,8 @@ function drawSelectionOverlay(ctx, sel) {
 function applyTranslatedGeometry(a, orig, dx, dy) {
   switch (a.type) {
     case 'pen': case 'highlighter': a.points = orig.points.map((p) => ({ x: p.x + dx, y: p.y + dy })); break;
-    case 'line': case 'arrow': case 'rect': case 'circle':
+    case 'line': case 'arrow': case 'arrow2': case 'rect': case 'roundrect': case 'circle':
+    case 'triangle': case 'diamond': case 'pentagon': case 'hexagon': case 'octagon': case 'star':
       a.x1 = orig.x1 + dx; a.y1 = orig.y1 + dy; a.x2 = orig.x2 + dx; a.y2 = orig.y2 + dy; break;
     case 'text': case 'image': a.x = orig.x + dx; a.y = orig.y + dy; break;
   }
@@ -1775,7 +1911,7 @@ function getPos(canvas, e) { const r = canvas.getBoundingClientRect(); return { 
 
 function constrainShape(s) {
   const dx = s.x2 - s.x1, dy = s.y2 - s.y1;
-  if (s.type === 'line' || s.type === 'arrow') {
+  if (s.type === 'line' || s.type === 'arrow' || s.type === 'arrow2') {
     const step = Math.PI / 4, ang = Math.round(Math.atan2(dy, dx) / step) * step, len = Math.hypot(dx, dy);
     s.x2 = s.x1 + Math.cos(ang) * len; s.y2 = s.y1 + Math.sin(ang) * len;
   } else {
@@ -1814,7 +1950,7 @@ function onPointerDown(e) {
         opacity: tool === 'highlighter' ? App.highlighterOpacity : 1
       }
     });
-  } else if (tool === 'arrow' || tool === 'line' || tool === 'rect' || tool === 'circle') {
+  } else if (SHAPE_TOOLS.includes(tool)) {
     const p = toPdfSpace(pos);
     begin('draw', { shape: { id: genId(), type: tool, x1: p.x, y1: p.y, x2: p.x, y2: p.y, color: App.color, width: App.strokeWidth } });
   } else if (tool === 'text') {
@@ -2266,6 +2402,21 @@ function applySidebarState() {
 const exportMenu = $('exportMenu');
 const btnExportToggle = $('btnExportMenuToggle');
 function closeExportMenu() { exportMenu.classList.add('hidden'); btnExportToggle.setAttribute('aria-expanded', 'false'); }
+
+// =======================================================================
+// MORE-SHAPES MENU (popover, positioned in fixed/viewport space so the
+// scrollable left toolbar never clips it)
+// =======================================================================
+const shapesMenu = $('shapesMenu');
+const btnMoreShapes = $('btnMoreShapes');
+function closeShapesMenu() { shapesMenu.classList.add('hidden'); btnMoreShapes.setAttribute('aria-expanded', 'false'); }
+function openShapesMenu() {
+  const r = btnMoreShapes.getBoundingClientRect();
+  shapesMenu.style.top = `${Math.max(8, r.top)}px`;
+  shapesMenu.style.left = `${r.right + 8}px`;
+  shapesMenu.classList.remove('hidden');
+  btnMoreShapes.setAttribute('aria-expanded', 'true');
+}
 
 // =======================================================================
 // FILE LOADING
