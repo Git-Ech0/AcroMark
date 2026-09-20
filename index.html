@@ -3129,6 +3129,11 @@ App.keymap = loadKeymap();
 const helpModal = $('helpModal');
 const helpGrid = $('helpGrid');
 let capturingActionId = null;
+let pendingKeyCapture = null;
+function cancelKeybindCapture() {
+  if (pendingKeyCapture) { window.removeEventListener('keydown', pendingKeyCapture, true); pendingKeyCapture = null; }
+  if (capturingActionId) { capturingActionId = null; renderKeybindsList(); }
+}
 function renderKeybindsList() {
   helpGrid.innerHTML = '';
   const addRow = (kbdText, label, buttonsHtml) => {
@@ -3167,8 +3172,10 @@ helpGrid.addEventListener('click', (e) => {
   }
 });
 function armKeybindCapture() {
+  if (pendingKeyCapture) window.removeEventListener('keydown', pendingKeyCapture, true);
   const onKey = (e) => {
     e.preventDefault(); e.stopImmediatePropagation();
+    pendingKeyCapture = null;
     const id = capturingActionId;
     capturingActionId = null;
     if (e.key === 'Escape') { renderKeybindsList(); return; }
@@ -3180,10 +3187,11 @@ function armKeybindCapture() {
     saveKeymap();
     renderKeybindsList();
   };
+  pendingKeyCapture = onKey;
   window.addEventListener('keydown', onKey, { capture: true, once: true });
 }
 $('btnResetKeybinds').addEventListener('click', async () => {
-  const ok = await openConfirm({ title: 'Reset all shortcuts?', message: 'Every keyboard shortcut goes back to its default key.', confirmLabel: 'Reset' });
+  const ok = await openConfirm({ title: 'Reset all shortcuts?', message: 'Every keyboard shortcut goes back to its default key.', confirmLabel: 'Reset', danger: false });
   if (!ok) return;
   App.keymap = defaultKeymap();
   saveKeymap();
@@ -3191,7 +3199,7 @@ $('btnResetKeybinds').addEventListener('click', async () => {
 });
 renderKeybindsList();
 function toggleHelpModal() { helpModal.classList.toggle('hidden'); }
-function closeHelpModal() { helpModal.classList.add('hidden'); }
+function closeHelpModal() { helpModal.classList.add('hidden'); cancelKeybindCapture(); }
 
 // =======================================================================
 // KEYBOARD
@@ -3220,11 +3228,13 @@ window.addEventListener('keydown', (e) => {
   const key = e.key.toLowerCase();
   const mod = e.ctrlKey || e.metaKey;
 
-  if (mod && key === 's') { e.preventDefault(); exportAnnotatedPdf(); return; }
-  if (mod && key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }
-  if (mod && (key === 'y' || (key === 'z' && e.shiftKey))) { e.preventDefault(); redo(); return; }
-  if (mod && key === 'd' && App.selected) { e.preventDefault(); duplicateSelectedAnnotation(); return; }
-  if (mod && (key === ']' || key === '[') && App.selected) { e.preventDefault(); reorderSelectedAnnotation(key === ']'); return; }
+  // Modifier-chord actions (undo/redo/export/duplicate/reorder) are checked first, exactly
+  // as before, so they still fire no matter which drawing tool is currently active.
+  for (const a of KEYBIND_ACTIONS) {
+    const b = App.keymap[a.id];
+    if (b.mod && matchesBinding(key, mod, e.shiftKey, b)) { e.preventDefault(); runKeybindAction(a.id); return; }
+  }
+  if (mod && key === 'y') { e.preventDefault(); redo(); return; }   // classic Windows redo, always available
   if (mod || e.altKey) return;
 
   if (e.code === 'Space' && tag !== 'BUTTON') {
@@ -3232,11 +3242,11 @@ window.addEventListener('keydown', (e) => {
     if (!App.spaceHeld) { App.spaceHeld = true; syncToolAttr(); }
     return;
   }
-  const toolMap = { v: 'select', g: 'hand', p: 'pen', h: 'highlighter', a: 'arrow', l: 'line', r: 'rect', c: 'circle', t: 'text', n: 'comment', e: 'eraser' };
-  if (toolMap[key]) { setTool(toolMap[key]); return; }
-  if (key === 'i') { toggleSampling(); return; }
-  if (key === 's') { openSignatureModal(); return; }
-  if ((key === 'delete' || key === 'backspace') && App.selected) { e.preventDefault(); deleteSelectedAnnotation(); return; }
+  for (const a of KEYBIND_ACTIONS) {
+    const b = App.keymap[a.id];
+    if (!b.mod && matchesBinding(key, mod, e.shiftKey, b)) { e.preventDefault(); runKeybindAction(a.id); return; }
+  }
+  if (key === 'backspace' && App.selected) { e.preventDefault(); deleteSelectedAnnotation(); return; }
   if (key === 'enter' && App.selected) {
     const a = getSelectedAnnotation();
     if (a && a.type === 'text') { e.preventDefault(); openTextEditor(App.selected.pageNum, null, a); return; }
@@ -3247,10 +3257,8 @@ window.addEventListener('keydown', (e) => {
     nudgeSelected(key === 'arrowleft' ? -step : key === 'arrowright' ? step : 0, key === 'arrowup' ? -step : key === 'arrowdown' ? step : 0);
     return;
   }
-  if (key === '?') { toggleHelpModal(); return; }
-  if (key === '+' || key === '=') { stepZoom(1); return; }
-  if (key === '-' || key === '_') { stepZoom(-1); return; }
-  if (key === '0') { setScale(1.25); return; }
+  if (key === '+') { stepZoom(1); return; }
+  if (key === '_') { stepZoom(-1); return; }
 });
 window.addEventListener('keyup', (e) => { if (e.code === 'Space' && App.spaceHeld) { App.spaceHeld = false; syncToolAttr(); } });
 window.addEventListener('blur', () => { if (App.spaceHeld) { App.spaceHeld = false; syncToolAttr(); } });
