@@ -594,7 +594,7 @@
         <p class="text-muted pb-1">Click the pencil to change a shortcut — press any key to set it, Esc to cancel.</p>
         <div id="helpGrid" class="grid grid-cols-[auto_1fr_auto] gap-x-3 gap-y-2 items-center"></div>
         <p class="text-muted pt-3 border-t border-hairline mt-3 leading-relaxed">
-          With the Select tool, click a shape to move it, drag any of its points to reshape it, or click the red badge to delete it. Curved lines have a third point in the middle — drag it to bend the curve. Double-click (or double-tap) text to edit it, and use the arrow keys to nudge. Hold Shift while drawing a line, arrow, curve, rectangle or circle to snap the angle or make it square. Changing the colour or size while something is selected restyles it. Right-click any mark, in any tool, for Duplicate / Bring to Front / Send to Back / Delete. Hold the middle mouse button anywhere to pan without switching tools. On touch screens, use the Pan tool to scroll the page. The Detect &amp; Edit Text tool reads the PDF's real text and turns it into click-to-edit boxes styled to match — pick a line or paragraph, type over it, and the original text underneath is replaced.
+          With the Select tool, click a shape to move it, drag any of its points to reshape it, or click the red badge to delete it. Curved lines have a third point in the middle — drag it to bend the curve. Double-click (or double-tap) text to edit it, and use the arrow keys to nudge. Hold Shift while drawing a line, arrow, curve, rectangle or circle to snap the angle or make it square. Changing the colour or size while something is selected restyles it. Right-click any mark, in any tool, for Duplicate / Bring to Front / Send to Back / Delete. Hold the middle mouse button anywhere to pan without switching tools. On touch screens, use the Pan tool to scroll the page. The Detect &amp; Edit Text tool reads the PDF's real text and turns it into click-to-edit boxes styled to match — pick a line or paragraph, type over it, and the original text underneath is replaced. It also finds answers typed on top of the page by annotation tools such as Kami; replacing one removes the original from the saved PDF.
         </p>
       </div>
     </div>
@@ -704,6 +704,40 @@ function bytesFromDataUrl(dataUrl) {
   return out;
 }
 
+// Takes annotations out of one page's /Annots by pdf.js annotation id ("185R" = object 185, generation
+// 0 — pdf.js names an annotation after its object reference, so the same id finds it here). This is how
+// a sensed edit of a *typed-answer annotation* (a Kami/Acrobat text box) really replaces it: annotations
+// paint on top of the page content, so the white patch a normal sensed edit draws into the content
+// stream would sit underneath the old text and never hide it. Pop-up notes that belong to a removed
+// annotation go with it, and the annotation objects are dropped from the file so they aren't left behind.
+// Returns how many annotations were removed.
+function removeAnnotationsById(doc, page, ids) {
+  const { PDFRef, PDFName } = PDFLib;
+  if (!ids || !ids.size) return 0;
+  const annots = page.node.Annots();
+  if (!annots) return 0;
+  const want = new Set();
+  for (const id of ids) {
+    const m = /^(\d+)R(\d*)$/.exec(String(id));
+    if (m) want.add(m[1] + ' ' + (m[2] ? +m[2] : 0));
+  }
+  if (!want.size) return 0;
+  const gone = [];
+  for (let i = annots.size() - 1; i >= 0; i--) {
+    const ref = annots.get(i);
+    if (ref instanceof PDFRef && want.has(ref.objectNumber + ' ' + ref.generationNumber)) { annots.remove(i); gone.push(ref); }
+  }
+  if (!gone.length) return 0;
+  const isGone = (r) => r instanceof PDFRef && gone.some((g) => g.objectNumber === r.objectNumber && g.generationNumber === r.generationNumber);
+  const orphans = [];
+  for (let i = annots.size() - 1; i >= 0; i--) {
+    const entry = annots.lookup(i);
+    if (entry && typeof entry.get === 'function' && isGone(entry.get(PDFName.of('Parent')))) { orphans.push(annots.get(i)); annots.remove(i); }
+  }
+  for (const ref of [...gone, ...orphans]) { if (ref instanceof PDFRef) doc.context.delete(ref); }
+  return gone.length;
+}
+
 // Builds the annotated PDF. `comments` must already be sorted, each with `.n` (display number).
 // `rasterize(a)` is only used for text that Helvetica can't encode; it returns {png, x1, y1, x2, y2}.
 async function buildAnnotatedPdf(opts) {
@@ -774,6 +808,12 @@ async function buildAnnotatedPdf(opts) {
     const vp = jsPage.getViewport({ scale: 1 });
     const rot = ((Math.round(vp.rotation) % 360) + 360) % 360;
     const page = pages[n - 1];
+    // Typed-answer annotations (Kami etc.) that a sensed edit replaces come out of the page first.
+    const replacedIds = new Set(list.filter((a) => a.type === 'text' && a.replacesAnnotId).map((a) => a.replacesAnnotId));
+    if (replacedIds.size) {
+      try { removeAnnotationsById(doc, page, replacedIds); }
+      catch (err) { console.warn('AcroMark: could not remove a replaced annotation on page', n, err); }
+    }
     const P = (x, y) => { const p = vp.convertToPdfPoint(x, y); return { x: p[0], y: p[1] }; };
     const placeImage = (img, x1, y1, x2, y2) => {
       const o = P(x1, y2); // visual bottom-left corner
@@ -1239,6 +1279,7 @@ function sanitizeAnnotation(raw) {
         out.coverRect = { x1: cr.x1, y1: cr.y1, x2: cr.x2, y2: cr.y2 };
         out.coverColor = HEX_RE.test(raw.coverColor) ? raw.coverColor : '#ffffff';
       }
+      if (typeof raw.replacesAnnotId === 'string' && /^\d{1,9}R\d{0,5}$/.test(raw.replacesAnnotId)) out.replacesAnnotId = raw.replacesAnnotId;
       return out;
     }
     case 'image': {
@@ -1701,7 +1742,7 @@ function duplicateSelectedAnnotation() {
       copy.x += off; copy.y += off;
       // A duplicate is a new, independent piece of text — it shouldn't drag along the original's
       // "this patches over real PDF text" whiteout, or it'd leave that patch behind, unmoved.
-      if (copy.type === 'text') { delete copy.coverRect; delete copy.coverColor; }
+      if (copy.type === 'text') { delete copy.coverRect; delete copy.coverColor; delete copy.replacesAnnotId; }
       break;
     case 'curve':
       copy.x1 += off; copy.y1 += off; copy.x2 += off; copy.y2 += off; copy.cx += off; copy.cy += off; break;
@@ -2493,7 +2534,11 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
         pushHistory();
         App.pageAnnotations[pageNum].push({
           id: genId(), type: 'text', text: val, x: at.x, y: at.y, ...style,
-          coverRect: { ...sensedBlock.bbox }, coverColor: sensedBlock.bgColor || '#ffffff'
+          coverRect: { ...sensedBlock.bbox }, coverColor: sensedBlock.bgColor || '#ffffff',
+          // Text that came from an annotation (a Kami/Acrobat typed answer) sits *above* the page content,
+          // so the whiteout patch alone can't hide it in the saved PDF — the export removes that very
+          // annotation instead. This is the pdf.js id it is found by.
+          ...(sensedBlock.annotId ? { replacesAnnotId: sensedBlock.annotId } : {})
         });
       } else {
         if (!val.trim()) return;
@@ -2620,37 +2665,188 @@ function sampleRegionColors(pageNum, bboxDoc) {
   }
   return { bg: bgHex, ink: inkHex };
 }
+// A line counts as a sub/superscript candidate only if its glyphs are smaller than this fraction of the
+// host line's, and it is made of no more than this many separately-drawn pieces. Page text keeps the
+// conservative defaults. Annotation text gets looser ones: equation editors like Kami's set super- and
+// subscripts at ~83% of body size (just over the 0.82 cutoff), and draw a multi-character exponent such as
+// "-12" as one piece per character. Inside a single typed box there is nothing unrelated to pull in by
+// accident, so the looser limits are safe there.
+const SUPSUB_MAX_SIZE_RATIO = 0.82;
+const SUPSUB_MAX_ITEMS = 2;
+const ANNOTATION_SUPSUB = { ratio: 0.92, items: 6 };
+// ---------------------------------------------------------------------------------------------
+// ANNOTATION TEXT — typed answers that live *outside* the page's own content stream.
+//
+// Kami (and Acrobat "Add text", and friends) save each typed answer as its own annotation — a
+// Stamp or FreeText sitting on top of the page — whose look is an appearance stream, often with
+// the real text buried in a nested Form XObject. page.getTextContent() only ever reads the
+// page's own content stream, so none of that text is visible to it. The operator list, though,
+// is what pdf.js actually *draws*, and with annotationMode ENABLE it splices every annotation's
+// appearance in between beginAnnotation/endAnnotation ops — with nested forms already followed and
+// every glyph already mapped back to Unicode through the font's ToUnicode map. So instead of
+// parsing content streams and decoding subset-font glyph ids by hand, this walks that list,
+// tracks the graphics/text state pdf.js itself tracks (CTM, text matrix, font, spacing) and hands
+// back items in the same shape getTextContent() produces, grouped by the annotation they came
+// from. Everything downstream (baseline clustering, sub/superscript folding, style guessing)
+// then works on them unchanged.
+// ---------------------------------------------------------------------------------------------
+// pdf.js's own view of a font, shaped like the entries of getTextContent().styles — which only
+// exist for fonts the *page* content uses, not for ones an annotation brings along.
+function annotationFontStyle(page, fontName) {
+  try {
+    if (page.commonObjs && page.commonObjs.has(fontName)) {
+      const f = page.commonObjs.get(fontName);
+      if (f) {
+        const fam = f.fallbackName || (f.isMonospace ? 'monospace' : f.isSerifFont ? 'serif' : 'sans-serif');
+        return { fontFamily: fam, ascent: f.ascent, descent: f.descent };
+      }
+    }
+  } catch (err) { /* font not resolved (yet) — geometry falls back to 0.8 / 0.2 em */ }
+  return {};
+}
+// Returns [{ id, rect, hasGraphics, items }] — one entry per annotation that draws real text.
+// `id` is pdf.js's annotation id (the object reference, e.g. "185R"), which is also how the
+// exporter finds the very same annotation again to take it out of the saved PDF.
+// `hasGraphics` is true when the same appearance also strokes/fills/paints images (a text box
+// with a border, say) — such an annotation is not a plain typed answer, so callers leave it alone.
+async function getAnnotationTextRuns(page) {
+  const OPS = pdfjsLib.OPS;
+  // Most pages have no annotation worth walking; asking is cheap and spares the op-list scan.
+  try {
+    const annots = await page.getAnnotations({ intent: 'display' });
+    if (!annots.some((a) => a.subtype !== 'Link' && a.subtype !== 'Popup' && a.subtype !== 'Widget')) return [];
+  } catch (err) { /* fall through and just scan */ }
+  const opList = await page.getOperatorList({ intent: 'display', annotationMode: pdfjsLib.AnnotationMode.ENABLE });
+  const { fnArray, argsArray } = opList;
+  const mul = (a, b) => pdfjsLib.Util.transform(a, b);   // a·b — b is applied first (canvas convention)
+  const IDENT = [1, 0, 0, 1, 0, 0];
+  const PAINT_OPS = new Set([
+    OPS.stroke, OPS.closeStroke, OPS.fillStroke, OPS.eoFillStroke, OPS.closeFillStroke, OPS.closeEOFillStroke,
+    OPS.shadingFill, OPS.paintImageXObject, OPS.paintInlineImageXObject, OPS.paintImageMaskXObject,
+    OPS.paintImageXObjectRepeat, OPS.paintImageMaskXObjectRepeat, OPS.paintSolidColorImageMask, OPS.paintJpegXObject
+  ].filter((v) => v !== undefined));
+  const freshState = () => ({ ctm: IDENT, font: null, size: 0, cs: 0, ws: 0, hs: 1, lead: 0, rise: 0 });
+
+  const groups = [];
+  let g = null, gs = null, stack = [], tm = IDENT, tlm = IDENT, pathPending = false;
+  const moveText = (x, y) => { tlm = mul(tlm, [1, 0, 0, 1, x, y]); tm = tlm; };
+  const showGlyphs = (glyphs) => {
+    if (!gs.font || !Array.isArray(glyphs)) return;
+    const fs = gs.size, hs = gs.hs;
+    let str = '', adv = 0, gapPending = false;   // adv: how far the run moves along the baseline, in text-space units
+    for (const gl of glyphs) {
+      if (typeof gl === 'number') {   // TJ adjustment (thousandths of an em; negative moves right)
+        adv += (-gl * fs / 1000) * hs;
+        if (-gl > 140) gapPending = true;   // a wide one is how PDFs write a word space — keep it as one
+        continue;
+      }
+      if (!gl) continue;
+      if (gapPending) { if (str && !/\s$/.test(str) && !/^\s/.test(gl.unicode || '')) str += ' '; gapPending = false; }
+      if (typeof gl.unicode === 'string') str += gl.unicode;
+      adv += ((gl.width || 0) / 1000 * fs + gs.cs + (gl.isSpace ? gs.ws : 0)) * hs;
+    }
+    const trm = mul(gs.ctm, mul(tm, [fs * hs, 0, 0, fs, 0, gs.rise]));   // text rendering matrix (font size included)
+    const tsm = mul(gs.ctm, tm);
+    g.items.push({
+      str, transform: trm, width: adv * Math.hypot(tsm[0], tsm[1]), height: Math.hypot(trm[2], trm[3]),
+      fontName: gs.font, hasEOL: false
+    });
+    tm = mul(tm, [1, 0, 0, 1, adv, 0]);
+  };
+
+  for (let i = 0; i < fnArray.length; i++) {
+    const fn = fnArray[i], args = argsArray[i];
+    if (fn === OPS.beginAnnotation) {
+      // args: [id, rect, transform (AP BBox -> Rect), matrix (the AP's own /Matrix), hasOwnCanvas]
+      g = { id: String(args[0]), rect: args[1], hasGraphics: false, items: [] };
+      gs = freshState();
+      gs.ctm = mul(mul(IDENT, args[2] || IDENT), args[3] || IDENT);
+      stack = []; tm = tlm = IDENT; pathPending = false;
+      continue;
+    }
+    if (fn === OPS.endAnnotation) { if (g && g.items.some((it) => it.str.trim())) groups.push(g); g = null; continue; }
+    if (!g) continue;
+    switch (fn) {
+      case OPS.save: stack.push({ ...gs }); break;
+      case OPS.restore: if (stack.length) gs = stack.pop(); break;
+      case OPS.transform: gs.ctm = mul(gs.ctm, args); break;
+      case OPS.paintFormXObjectBegin: stack.push({ ...gs }); if (Array.isArray(args[0]) && args[0].length === 6) gs.ctm = mul(gs.ctm, args[0]); break;
+      case OPS.paintFormXObjectEnd: if (stack.length) gs = stack.pop(); break;
+      case OPS.beginText: tm = tlm = IDENT; break;
+      case OPS.setFont: gs.font = args[0]; gs.size = Math.abs(args[1]) || 0; break;
+      case OPS.setCharSpacing: gs.cs = args[0]; break;
+      case OPS.setWordSpacing: gs.ws = args[0]; break;
+      case OPS.setHScale: gs.hs = args[0] / 100; break;
+      case OPS.setLeading: gs.lead = -args[0]; break;
+      case OPS.setTextRise: gs.rise = args[0]; break;
+      case OPS.setTextMatrix: tm = tlm = args.slice(0, 6); break;
+      case OPS.moveText: moveText(args[0], args[1]); break;
+      case OPS.setLeadingMoveText: gs.lead = args[1]; moveText(args[0], args[1]); break;
+      case OPS.nextLine: moveText(0, gs.lead); break;
+      case OPS.showText: case OPS.showSpacedText: showGlyphs(args[0]); break;
+      case OPS.nextLineShowText: moveText(0, gs.lead); showGlyphs(args[0]); break;
+      case OPS.nextLineSetSpacingShowText: gs.ws = args[0]; gs.cs = args[1]; moveText(0, gs.lead); showGlyphs(args[2]); break;
+      case OPS.constructPath: pathPending = true; break;
+      case OPS.endPath: pathPending = false; break;
+      case OPS.fill: case OPS.eoFill:
+        // A text appearance often contains a bare "f" with no path (an empty background fill) — only a
+        // fill that actually follows a path counts as drawing.
+        if (pathPending) g.hasGraphics = true;
+        pathPending = false;
+        break;
+      default: if (PAINT_OPS.has(fn)) { g.hasGraphics = true; pathPending = false; }
+    }
+  }
+  return groups;
+}
+
+// One pdf.js text item -> the flat record the clustering below works on, or null for a pure
+// layout blank (no text and no width).
+function rawTextItem(page, item, viewport, style) {
+  if (!item.transform || item.transform.length !== 6) return null;
+  const hasText = !!(item.str && item.str.trim());
+  // Some glyphs — a bullet or checkmark from a dingbat/symbol font, a hand-picked "wingding"
+  // character, anything whose font has no usable ToUnicode/text mapping — come back from
+  // pdf.js as an empty string even though they have real width and sit at a real position on
+  // the page. The old filter dropped those outright, which silently punches a hole in the
+  // line: a bulleted line loses its bullet and gets misread as starting mid-sentence, or two
+  // words on either side of the missing symbol get run together. A true blank (no text and no
+  // width — a pure layout/kerning artifact) is still skipped; anything with real width is kept
+  // as a stand-in glyph so the line it belongs to still groups and spaces correctly.
+  if (!hasText && !(item.width > 0.02)) return null;
+  const st = style || {};
+  const geo = textItemGeometry(item, viewport, st);
+  const weight = guessFontWeight(page, item.fontName);
+  return {
+    str: hasText ? item.str : '\u25A1', unmapped: !hasText,
+    x1: geo.x1, y1: geo.y1, x2: geo.x2, y2: geo.y2, baseX: geo.baseX, baseY: geo.baseY,
+    angle: geo.angle, fontHeight: geo.fontHeight, fontFamily: classifyFontFamily(st.fontFamily),
+    bold: weight.bold, italic: weight.italic, hasEOL: !!item.hasEOL
+  };
+}
+
+// A line's baseline. Normally every item shares one, so this is the plain mean. When a folded-in
+// exponent or subscript sits on a different baseline, weight by characters instead, so a couple of
+// raised glyphs can't drag the whole line's baseline (and with it the replacement text) off the body text.
+function lineBaseline(items) {
+  const ys = items.map((it) => it.baseY);
+  const mean = ys.reduce((s, v) => s + v, 0) / ys.length;
+  if (Math.max(...ys) - Math.min(...ys) < 0.5) return mean;
+  let num = 0, den = 0;
+  for (const it of items) { const w = Math.max(1, it.str.length); num += it.baseY * w; den += w; }
+  return num / den;
+}
 // items -> lines -> paragraph-shaped blocks, each with a guessed style. Geometry only; colour is
 // filled in afterwards by ensureTextBlocks() once it can sample the rendered page.
-async function computeTextBlocks(page, pageNum) {
-  const [textContent, viewport] = [await page.getTextContent(), page.getViewport({ scale: 1 })];
-  const styles = textContent.styles || {};
-  const raw = [];
-  for (const item of textContent.items) {
-    if (!item.transform || item.transform.length !== 6) continue;
-    const hasText = !!(item.str && item.str.trim());
-    // Some glyphs — a bullet or checkmark from a dingbat/symbol font, a hand-picked "wingding"
-    // character, anything whose font has no usable ToUnicode/text mapping — come back from
-    // pdf.js as an empty string even though they have real width and sit at a real position on
-    // the page. The old filter dropped those outright, which silently punches a hole in the
-    // line: a bulleted line loses its bullet and gets misread as starting mid-sentence, or two
-    // words on either side of the missing symbol get run together. A true blank (no text and no
-    // width — a pure layout/kerning artifact) is still skipped; anything with real width is kept
-    // as a stand-in glyph so the line it belongs to still groups and spaces correctly.
-    if (!hasText && !(item.width > 0.02)) continue;
-    const style = styles[item.fontName] || {};
-    const geo = textItemGeometry(item, viewport, style);
-    const weight = guessFontWeight(page, item.fontName);
-    raw.push({
-      str: hasText ? item.str : '\u25A1', unmapped: !hasText,
-      x1: geo.x1, y1: geo.y1, x2: geo.x2, y2: geo.y2, baseX: geo.baseX, baseY: geo.baseY,
-      angle: geo.angle, fontHeight: geo.fontHeight, fontFamily: classifyFontFamily(style.fontFamily),
-      bold: weight.bold, italic: weight.italic, hasEOL: !!item.hasEOL
-    });
-  }
+// `opts.singleBlock` keeps everything in one block instead of splitting paragraphs — used for
+// annotation text, where one annotation is one typed box and has to stay one unit: it is
+// replaced (and, on export, removed) as a whole. Block ids are assigned by the caller.
+function clusterTextItems(raw, pageNum, opts) {
   if (!raw.length) return [];
 
   // ---- items -> lines: cluster by baseline, then order along the advance direction ----
+  const supRatio = (opts && opts.supsub && opts.supsub.ratio) || SUPSUB_MAX_SIZE_RATIO;
+  const supItems = (opts && opts.supsub && opts.supsub.items) || SUPSUB_MAX_ITEMS;
   raw.sort((a, b) => (a.angle - b.angle) || (a.baseY - b.baseY) || (a.baseX - b.baseX));
   const lines = [];
   for (const it of raw) {
@@ -2675,11 +2871,11 @@ async function computeTextBlocks(page, pageNum) {
   // page never gets pulled in by coincidence.
   for (let i = lines.length - 1; i >= 0; i--) {
     const ln = lines[i];
-    if (ln.items.length > 2) continue;   // only chase small, likely-isolated marks
+    if (ln.items.length > supItems) continue;   // only chase small, likely-isolated marks
     let host = null, bestGap = Infinity;
     for (const other of lines) {
       if (other === ln || other.angle !== ln.angle) continue;
-      if (other.fontHeight <= 0 || ln.fontHeight >= other.fontHeight * 0.82) continue;   // must read as visibly smaller
+      if (other.fontHeight <= 0 || ln.fontHeight >= other.fontHeight * supRatio) continue;   // must read as visibly smaller
       if (Math.abs(ln.baseY - other.baseY) > other.fontHeight * 0.9) continue;           // within the line's full height, not just its baseline
       const lnX1 = Math.min(...ln.items.map((it) => it.x1)), lnX2 = Math.max(...ln.items.map((it) => it.x2));
       const gap = Math.min(...other.items.map((it) => Math.max(lnX1 - it.x2, it.x1 - lnX2, 0)));
@@ -2709,34 +2905,41 @@ async function computeTextBlocks(page, pageNum) {
     const [fontFamily, boldS, italicS] = bestKey.split('|');
     return {
       text: text.trim(), x1, y1, x2, y2, angle: ln.angle, fontHeight: wlen ? wsum / wlen : ln.fontHeight,
-      baseX: items[0].baseX, baseY: items.reduce((s, it) => s + it.baseY, 0) / items.length,
+      baseX: items[0].baseX, baseY: lineBaseline(items),
       fontFamily, bold: boldS === 'true', italic: italicS === 'true'
     };
   }).filter((ln) => ln.text);
   lineRecs.sort((a, b) => (a.angle - b.angle) || (a.y1 - b.y1) || (a.x1 - b.x1));
+  if (!lineRecs.length) return [];
 
   // ---- lines -> paragraph blocks: merge consecutive same-angle lines that are close enough
   // together, in a similar enough size, to plausibly be the same paragraph ----
   const blocks = [];
-  let cur = null;
-  for (const ln of lineRecs) {
-    if (cur && cur.angle === ln.angle) {
-      const gap = ln.baseY - cur.lastBaseY;
-      const sameSize = ln.fontHeight > 0 && cur.lastFontHeight > 0 &&
-        ln.fontHeight / cur.lastFontHeight < 1.35 && cur.lastFontHeight / ln.fontHeight < 1.35;
-      if (sameSize && gap > 0 && gap <= cur.lastFontHeight * 2.15) {
-        cur.lines.push(ln);
-        cur.x1 = Math.min(cur.x1, ln.x1); cur.y1 = Math.min(cur.y1, ln.y1);
-        cur.x2 = Math.max(cur.x2, ln.x2); cur.y2 = Math.max(cur.y2, ln.y2);
-        cur.lastBaseY = ln.baseY; cur.lastFontHeight = ln.fontHeight;
-        continue;
+  if (opts && opts.singleBlock) {
+    const b = { lines: lineRecs, x1: Infinity, y1: Infinity, x2: -Infinity, y2: -Infinity, angle: lineRecs[0].angle };
+    for (const ln of lineRecs) { b.x1 = Math.min(b.x1, ln.x1); b.y1 = Math.min(b.y1, ln.y1); b.x2 = Math.max(b.x2, ln.x2); b.y2 = Math.max(b.y2, ln.y2); }
+    blocks.push(b);
+  } else {
+    let cur = null;
+    for (const ln of lineRecs) {
+      if (cur && cur.angle === ln.angle) {
+        const gap = ln.baseY - cur.lastBaseY;
+        const sameSize = ln.fontHeight > 0 && cur.lastFontHeight > 0 &&
+          ln.fontHeight / cur.lastFontHeight < 1.35 && cur.lastFontHeight / ln.fontHeight < 1.35;
+        if (sameSize && gap > 0 && gap <= cur.lastFontHeight * 2.15) {
+          cur.lines.push(ln);
+          cur.x1 = Math.min(cur.x1, ln.x1); cur.y1 = Math.min(cur.y1, ln.y1);
+          cur.x2 = Math.max(cur.x2, ln.x2); cur.y2 = Math.max(cur.y2, ln.y2);
+          cur.lastBaseY = ln.baseY; cur.lastFontHeight = ln.fontHeight;
+          continue;
+        }
       }
+      cur = { lines: [ln], x1: ln.x1, y1: ln.y1, x2: ln.x2, y2: ln.y2, angle: ln.angle, lastBaseY: ln.baseY, lastFontHeight: ln.fontHeight };
+      blocks.push(cur);
     }
-    cur = { lines: [ln], x1: ln.x1, y1: ln.y1, x2: ln.x2, y2: ln.y2, angle: ln.angle, lastBaseY: ln.baseY, lastFontHeight: ln.fontHeight };
-    blocks.push(cur);
   }
 
-  return blocks.map((b, i) => {
+  return blocks.map((b) => {
     const first = b.lines[0];
     const tally = new Map();
     b.lines.forEach((l) => { const k = l.fontFamily + '|' + l.bold + '|' + l.italic; tally.set(k, (tally.get(k) || 0) + l.text.length); });
@@ -2756,7 +2959,7 @@ async function computeTextBlocks(page, pageNum) {
       }
     }
     return {
-      id: 'tb' + pageNum + '_' + i, page: pageNum,
+      id: null, page: pageNum,
       bbox: { x1: b.x1 - 1, y1: b.y1 - 1, x2: b.x2 + 1, y2: b.y2 + 1 },
       // One region per line rather than just the first line — see ensureTextBlocks(), where these
       // are sampled and combined by a length-weighted vote. A block that mixes a highlighted
@@ -2770,6 +2973,35 @@ async function computeTextBlocks(page, pageNum) {
       color: '#111827', bgColor: '#ffffff'
     };
   });
+}
+
+// Everything the tool can detect on one page: the page's own text first, then the text of any
+// annotation (typed answers etc.) on top of it. Annotation blocks come last so that, where a typed
+// answer sits over printed text, hit-testing (which scans back to front) picks the answer.
+async function computeTextBlocks(page, pageNum) {
+  const [textContent, viewport] = [await page.getTextContent(), page.getViewport({ scale: 1 })];
+  const styles = textContent.styles || {};
+  const raw = [];
+  for (const item of textContent.items) {
+    const r = rawTextItem(page, item, viewport, styles[item.fontName]);
+    if (r) raw.push(r);
+  }
+  const blocks = clusterTextItems(raw, pageNum, {});
+
+  let runs = [];
+  try { runs = await getAnnotationTextRuns(page); }
+  catch (err) { console.warn('AcroMark: annotation text detection failed on page', pageNum, err); }
+  for (const run of runs) {
+    if (run.hasGraphics) continue;   // not a plain typed answer — replacing it could take artwork with it
+    const rawA = [];
+    for (const item of run.items) {
+      const r = rawTextItem(page, item, viewport, annotationFontStyle(page, item.fontName));
+      if (r) rawA.push(r);
+    }
+    for (const b of clusterTextItems(rawA, pageNum, { singleBlock: true, supsub: ANNOTATION_SUPSUB })) { b.annotId = run.id; blocks.push(b); }
+  }
+  blocks.forEach((b, i) => { b.id = 'tb' + pageNum + '_' + i; });
+  return blocks;
 }
 // Scans (and caches) a page's text blocks the first time they're needed — after the page has
 // rendered, so both the font objects (bold/italic guessing) and the pixel data (colour guessing)
@@ -2827,7 +3059,12 @@ function senseHitTest(pageNum, p) {
   const blocks = App.pageTextBlocks[pageNum];
   if (blocks) {
     for (let i = blocks.length - 1; i >= 0; i--) {
-      if (pointInRect(p, blocks[i].bbox)) return { kind: 'block', block: blocks[i] };
+      if (!pointInRect(p, blocks[i].bbox)) continue;
+      // A typed-answer annotation that already has an edit: re-open that edit rather than starting a
+      // second one over the same stamp (which would draw the old text twice).
+      const id = blocks[i].annotId;
+      const done = id && list.find((a) => a.type === 'text' && a.replacesAnnotId === id);
+      return done ? { kind: 'annot', a: done } : { kind: 'block', block: blocks[i] };
     }
   }
   return null;
