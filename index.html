@@ -1754,7 +1754,7 @@ function handleIdleHover(e) {
   const canvas = e.target instanceof Element ? e.target.closest('canvas.annotation-layer') : null;
   if (!canvas) return;
   const pageNum = +canvas.dataset.pageNum;
-  if (effectiveTool() !== 'select') {
+  if (!toolSupportsSelect(effectiveTool())) {
     canvas.style.cursor = '';
     if (App.hover) { requestRedraw(App.hover.pageNum); App.hover = null; }
     return;
@@ -2098,6 +2098,10 @@ function applyThumbsState() {
 // =======================================================================
 function effectiveTool() { return App.spaceHeld ? 'hand' : App.activeTool; }
 function syncToolAttr() { document.body.dataset.tool = effectiveTool(); }
+// Drawing tools (pen/highlighter/shapes) double as a selection tool for anything already on the
+// page: click an existing mark and you get it selected/movable without a trip to Select first.
+// Text, Comment, Eraser and Hand keep their own dedicated click behaviour, so they're excluded.
+function toolSupportsSelect(tool) { return tool === 'select' || tool === 'pen' || tool === 'highlighter' || SHAPE_TOOLS.includes(tool); }
 function getPos(canvas, e) { const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
 
 function constrainShape(s) {
@@ -2140,6 +2144,7 @@ function onPointerDown(e) {
   } else if (tool === 'select') {
     if (handleSelectPointerDown(pageNum, pos)) begin('select');
   } else if (tool === 'pen' || tool === 'highlighter') {
+    if (handleSelectPointerDown(pageNum, pos)) { begin('select'); e.preventDefault(); return; }
     begin('draw', {
       shape: {
         id: genId(), type: tool, points: [toPdfSpace(pos)], color: App.color,
@@ -2148,6 +2153,7 @@ function onPointerDown(e) {
       }
     });
   } else if (SHAPE_TOOLS.includes(tool)) {
+    if (handleSelectPointerDown(pageNum, pos)) { begin('select'); e.preventDefault(); return; }
     const p = toPdfSpace(pos);
     const shape = { id: genId(), type: tool, x1: p.x, y1: p.y, x2: p.x, y2: p.y, color: App.color, width: App.strokeWidth };
     if (tool === 'curve') { shape.cx = p.x; shape.cy = p.y; }   // starts flat; bend it after placing
@@ -2484,7 +2490,7 @@ function setTool(tool) {
   // and closing the popover leaves no toolbar button looking selected.
   btnMoreShapes.classList.toggle('active', shapesMenu.contains(document.querySelector(`.tool-btn[data-tool="${tool}"]`)));
   if (tool !== 'select' && App.selected) setSelected(null); else refreshControls();
-  if (tool !== 'select' && App.hover) { requestRedraw(App.hover.pageNum); App.hover = null; }
+  if (!toolSupportsSelect(tool) && App.hover) { requestRedraw(App.hover.pageNum); App.hover = null; }
 }
 function beginStyleEdit() { if (!App.styleEditOpen) { pushHistory(); App.styleEditOpen = true; } }
 
