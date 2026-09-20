@@ -2627,12 +2627,23 @@ async function computeTextBlocks(page, pageNum) {
   const styles = textContent.styles || {};
   const raw = [];
   for (const item of textContent.items) {
-    if (!item.str || !item.str.trim() || !item.transform || item.transform.length !== 6) continue;
+    if (!item.transform || item.transform.length !== 6) continue;
+    const hasText = !!(item.str && item.str.trim());
+    // Some glyphs — a bullet or checkmark from a dingbat/symbol font, a hand-picked "wingding"
+    // character, anything whose font has no usable ToUnicode/text mapping — come back from
+    // pdf.js as an empty string even though they have real width and sit at a real position on
+    // the page. The old filter dropped those outright, which silently punches a hole in the
+    // line: a bulleted line loses its bullet and gets misread as starting mid-sentence, or two
+    // words on either side of the missing symbol get run together. A true blank (no text and no
+    // width — a pure layout/kerning artifact) is still skipped; anything with real width is kept
+    // as a stand-in glyph so the line it belongs to still groups and spaces correctly.
+    if (!hasText && !(item.width > 0.02)) continue;
     const style = styles[item.fontName] || {};
     const geo = textItemGeometry(item, viewport, style);
     const weight = guessFontWeight(page, item.fontName);
     raw.push({
-      str: item.str, x1: geo.x1, y1: geo.y1, x2: geo.x2, y2: geo.y2, baseX: geo.baseX, baseY: geo.baseY,
+      str: hasText ? item.str : '\u25A1', unmapped: !hasText,
+      x1: geo.x1, y1: geo.y1, x2: geo.x2, y2: geo.y2, baseX: geo.baseX, baseY: geo.baseY,
       angle: geo.angle, fontHeight: geo.fontHeight, fontFamily: classifyFontFamily(style.fontFamily),
       bold: weight.bold, italic: weight.italic, hasEOL: !!item.hasEOL
     });
@@ -2652,6 +2663,30 @@ async function computeTextBlocks(page, pageNum) {
     if (!line) { line = { angle: it.angle, baseY: it.baseY, fontHeight: it.fontHeight, items: [] }; lines.push(line); }
     line.items.push(it);
     line.baseY = (line.baseY * (line.items.length - 1) + it.baseY) / line.items.length;
+  }
+
+  // ---- fold superscript/subscript glyphs into the line they visually belong to ----
+  // A footnote marker, exponent, or chemical subscript sits on its own baseline (shifted up or
+  // down from the surrounding sentence) and is usually noticeably smaller, so the pass above
+  // gives it its own single-glyph "line" instead of attaching it to the text it's actually part
+  // of. Re-merge any such small, isolated line into a same-angle neighbour whose full glyph
+  // envelope (not just its baseline) it falls inside, using horizontal adjacency — sitting right
+  // next to that line's text — as the safety check, so unrelated small text elsewhere on the
+  // page never gets pulled in by coincidence.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const ln = lines[i];
+    if (ln.items.length > 2) continue;   // only chase small, likely-isolated marks
+    let host = null, bestGap = Infinity;
+    for (const other of lines) {
+      if (other === ln || other.angle !== ln.angle) continue;
+      if (other.fontHeight <= 0 || ln.fontHeight >= other.fontHeight * 0.82) continue;   // must read as visibly smaller
+      if (Math.abs(ln.baseY - other.baseY) > other.fontHeight * 0.9) continue;           // within the line's full height, not just its baseline
+      const lnX1 = Math.min(...ln.items.map((it) => it.x1)), lnX2 = Math.max(...ln.items.map((it) => it.x2));
+      const gap = Math.min(...other.items.map((it) => Math.max(lnX1 - it.x2, it.x1 - lnX2, 0)));
+      if (gap > other.fontHeight * 1.2) continue;   // too far away to plausibly be part of that line
+      if (gap < bestGap) { bestGap = gap; host = other; }
+    }
+    if (host) { host.items.push(...ln.items); lines.splice(i, 1); }
   }
 
   // ---- collapse each line's items into one text run + one bbox + one majority style ----
@@ -2723,7 +2758,13 @@ async function computeTextBlocks(page, pageNum) {
     return {
       id: 'tb' + pageNum + '_' + i, page: pageNum,
       bbox: { x1: b.x1 - 1, y1: b.y1 - 1, x2: b.x2 + 1, y2: b.y2 + 1 },
-      sampleBBox: { x1: first.x1, y1: first.y1, x2: first.x2, y2: first.y2 },
+      // One region per line rather than just the first line — see ensureTextBlocks(), where these
+      // are sampled and combined by a length-weighted vote. A block that mixes a highlighted
+      // phrase, a colored heading, or any other already-formatted run in with plain text would
+      // otherwise have its ink/background guessed from whichever line happens to come first,
+      // giving the rest of the block a mismatched color or leaving a stray white patch where a
+      // highlight used to be.
+      sampleBBoxes: b.lines.map((l) => ({ x1: l.x1, y1: l.y1, x2: l.x2, y2: l.y2, len: l.text.length })),
       text: b.lines.map((l) => l.text).join('\n'), x: first.baseX, y: first.baseY,
       fontSize, fontFamily, bold: boldS === 'true', italic: italicS === 'true', align,
       color: '#111827', bgColor: '#ffffff'
@@ -2746,9 +2787,23 @@ async function ensureTextBlocks(n) {
     const blocks = await computeTextBlocks(page, n);
     if (gen !== App.docGen) return null;
     for (const b of blocks) {
-      const colors = sampleRegionColors(n, b.sampleBBox);
-      if (colors) { if (colors.ink) b.color = colors.ink; if (colors.bg) b.bgColor = colors.bg; }
-      delete b.sampleBBox;
+      // Sample every line's region and let the majority — weighted by how much text is on each
+      // line — decide the block's ink and background, the same way its font/bold/italic is
+      // already decided by majority vote below. This keeps one stray line (a highlighted phrase,
+      // a colored heading) from setting the color for text that's mostly a different color.
+      const inkTally = new Map(), bgTally = new Map();
+      for (const box of b.sampleBBoxes) {
+        const colors = sampleRegionColors(n, box);
+        if (!colors) continue;
+        const weight = Math.max(1, box.len);
+        if (colors.ink) inkTally.set(colors.ink, (inkTally.get(colors.ink) || 0) + weight);
+        if (colors.bg) bgTally.set(colors.bg, (bgTally.get(colors.bg) || 0) + weight);
+      }
+      const majorityOf = (tally) => (tally.size ? [...tally.entries()].sort((x, y) => y[1] - x[1])[0][0] : null);
+      const ink = majorityOf(inkTally), bg = majorityOf(bgTally);
+      if (ink) b.color = ink;
+      if (bg) b.bgColor = bg;
+      delete b.sampleBBoxes;
     }
     App.pageTextBlocks[n] = blocks;
     return blocks;
