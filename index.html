@@ -1013,6 +1013,53 @@ function scriptFontSize(a) { return (a.superscript || a.subscript) ? a.fontSize 
 function scriptBaselineShift(a) {
   return a.superscript ? -a.fontSize * SUPERSCRIPT_SHIFT_RATIO : a.subscript ? a.fontSize * SUBSCRIPT_SHIFT_RATIO : 0;
 }
+// ---------------------------------------------------------------------------------------------
+// RICH TEXT RUNS — a text annotation is still, first and foremost, one uniform style (the fields
+// above) applied to `a.text` as a whole — that's what a manually-typed box is, and it's what every
+// function above already handles. `a.runs`, when present, is an *addition* on top of that: an
+// array with one entry per line of `a.text`, each entry an array of `{ text, ...styleOverrides }`
+// runs whose concatenation (in order) reproduces that line. A run only needs to carry the fields
+// that differ from the annotation's own — resolveRunStyle() below fills in the rest — so a
+// paragraph that's 95% plain and has one bold word only spends extra data on that one word.
+// This is what lets one box hold, say, normal body text with a smaller raised footnote marker
+// in the middle of it, which is exactly what Text Sensing now hands over for text like that,
+// and what the rich inline editor (openTextEditor) lets a person build and edit by hand.
+// ---------------------------------------------------------------------------------------------
+function resolveRunStyle(a, run) {
+  return {
+    fontFamily: run.fontFamily || a.fontFamily,
+    bold: run.bold !== undefined ? run.bold : a.bold !== false,
+    italic: run.italic !== undefined ? run.italic : !!a.italic,
+    underline: run.underline !== undefined ? run.underline : !!a.underline,
+    superscript: !!run.superscript, subscript: !!run.subscript,
+    color: run.color || a.color,
+    // An explicit run.fontSize is already the exact size this run should render at (typically a
+    // size measured straight off the real PDF glyphs, for a sensed run) — nothing further is
+    // applied to it. One that isn't given falls back to the annotation's own nominal size, with
+    // the same auto-shrink a whole-annotation superscript/subscript toggle gets.
+    fontSize: run.fontSize != null ? run.fontSize : ((run.superscript || run.subscript) ? a.fontSize * SCRIPT_SIZE_SCALE : a.fontSize)
+  };
+}
+// A run's baseline shift is always measured against the annotation's own nominal size (the
+// surrounding "host" text), never the run's own — often already-shrunk — size, so a raised run
+// sits at the same visual height a plain superscript toggle would put it at, not a different one.
+function runBaselineShift(a, run) {
+  return run.superscript ? -a.fontSize * SUPERSCRIPT_SHIFT_RATIO : run.subscript ? a.fontSize * SUBSCRIPT_SHIFT_RATIO : 0;
+}
+// Measures one rich line (array of runs) in document units (scale 1) using `ctx` as the
+// measuring context. Every place that lays a rich line out — on-canvas, in the exported PDF, in
+// the live inline editor's auto-sizing — starts from this so the three never drift apart.
+function measureRichLine(a, lineRuns, ctx) {
+  let width = 0;
+  const parts = lineRuns.map((run) => {
+    const rs = resolveRunStyle(a, run);
+    ctx.font = canvasFontString(rs, rs.fontSize);
+    const w = ctx.measureText(run.text).width;
+    width += w;
+    return { run, rs, w, shift: runBaselineShift(a, run) };
+  });
+  return { parts, width };
+}
 const HEX_RE = /^#[0-9a-f]{6}$/i;
 const ZOOM_LEVELS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4];
 const MAX_CANVAS_PIXELS = 7e6;   // keeps big pages inside mobile canvas limits
@@ -1556,11 +1603,16 @@ function drawAnnotation(ctx, a, s, pageNum) {
 // down to the annotation's real font size — one measurement pass covers width, alignment offsets
 // and the bounding box together.
 function measureTextLines(a) {
-  measureCtx.font = canvasFontString(a, 100);
   const lines = String(a.text).split('\n');
+  if (a.runs) {
+    const rich = a.runs.map((lineRuns) => measureRichLine(a, lineRuns, measureCtx));
+    const widths = rich.map((r) => r.width);
+    return { lines, widths, maxW: Math.max(0, ...widths), rich };
+  }
+  measureCtx.font = canvasFontString(a, 100);
   const fs = scriptFontSize(a);
   const widths = lines.map((l) => measureCtx.measureText(l).width * fs / 100);
-  return { lines, widths, maxW: Math.max(0, ...widths) };
+  return { lines, widths, maxW: Math.max(0, ...widths), rich: null };
 }
 function textMetrics(a) {
   const m = measureTextLines(a);
