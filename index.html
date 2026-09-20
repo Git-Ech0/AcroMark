@@ -197,9 +197,15 @@
     .tool-btn.active { background: #e0ac5c; color: #1a1509; }
     .swatch { width: 20px; height: 20px; border-radius: 9999px; box-shadow: 0 0 0 1px rgb(var(--hairline2)); transition: box-shadow 0.12s; flex: none; }
     .swatch.active { box-shadow: 0 0 0 2px rgb(var(--canvas)), 0 0 0 4px rgb(var(--accent)); }
-    .color-input { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 9999px; background: none; cursor: pointer; }
-    .color-input::-webkit-color-swatch-wrapper { padding: 0; }
-    .color-input::-webkit-color-swatch { border: 1px solid rgb(var(--hairline2)); border-radius: 9999px; }
+    /* The native <input type="color"> swatch chip is drawn by the browser's own widget theme,
+       which on several browser/OS combinations composites a faint grey tint over the chosen
+       colour (most visible in dark mode) — so the "current colour" indicator can look visibly
+       off from the identical hex used everywhere else. We keep the native input only for its
+       picking behaviour (opacity: 0, but still on top and clickable) and paint the colour people
+       actually see with a plain background-color span underneath, which is exact by construction. */
+    .color-input-wrap { position: relative; width: 22px; height: 22px; display: inline-flex; cursor: pointer; flex: none; }
+    .color-input-swatch { position: absolute; inset: 0; border-radius: 9999px; border: 1px solid rgb(var(--hairline2)); pointer-events: none; }
+    .color-input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; opacity: 0; cursor: pointer; }
     .seg { padding: 0.375rem 0.75rem; font-size: 0.75rem; font-weight: 600; border-radius: 0.5rem; color: rgb(var(--muted)); }
     .seg.active { background: rgb(var(--raised)); color: rgb(var(--fg)); box-shadow: inset 0 0 0 1px rgb(var(--hairline2)); }
     .thumb-item.current .thumb-frame { box-shadow: 0 0 0 2px #d3923c; }
@@ -307,7 +313,10 @@
         <button class="swatch" style="background:#10b981" data-color="#10b981" title="Green" aria-label="Green"></button>
         <button class="swatch" style="background:#3b82f6" data-color="#3b82f6" title="Blue" aria-label="Blue"></button>
         <button class="swatch" style="background:#a855f7" data-color="#a855f7" title="Purple" aria-label="Purple"></button>
-        <input type="color" id="customColorPicker" value="#ef4444" class="color-input ml-1" title="Custom color" aria-label="Custom color" />
+        <span class="color-input-wrap ml-1" title="Custom color">
+          <span id="customColorSwatch" class="color-input-swatch" style="background:#ef4444"></span>
+          <input type="color" id="customColorPicker" value="#ef4444" class="color-input" aria-label="Custom color" />
+        </span>
       </div>
     </div>
 
@@ -997,6 +1006,10 @@ const opacitySlider = $('opacitySlider');
 const opacityValueLabel = $('opacityValueLabel');
 const colorPaletteEl = $('colorPalette');
 const customColorPicker = $('customColorPicker');
+const customColorSwatch = $('customColorSwatch');
+// Keeps the native <input type="color"> in sync for when the OS picker opens, and paints the
+// visible chip via plain background-color so it's never subject to the widget's own theming.
+function setCustomColorPickerValue(hex) { customColorPicker.value = hex; customColorSwatch.style.background = hex; }
 const btnUndo = $('btnUndo');
 const btnRedo = $('btnRedo');
 const fileInputEl = $('fileInput');
@@ -2543,7 +2556,7 @@ function refreshControls() {
   // never shows a stale colour left over from the last thing you drew.
   const currentColor = activeTextEditor ? activeTextEditor.getStyle().color : (sel && sel.color) ? sel.color : App.color;
   colorPaletteEl.querySelectorAll('.swatch').forEach((b) => b.classList.toggle('active', b.dataset.color === currentColor));
-  customColorPicker.value = currentColor;
+  setCustomColorPickerValue(currentColor);
   let mode = 'stroke';
   if (sel) mode = sel.type === 'text' ? 'text' : sel.type === 'highlighter' ? 'highlighter' : sel.type === 'image' ? 'none' : 'stroke';
   else if (App.activeTool === 'text') mode = 'text';
@@ -3104,10 +3117,10 @@ document.querySelectorAll('#colorPalette .swatch, #textStyleControls button').fo
 
 document.querySelectorAll('#colorPalette .swatch').forEach((btn) => btn.addEventListener('click', () => {
   App.styleEditOpen = false;
-  $('customColorPicker').value = btn.dataset.color;
+  setCustomColorPickerValue(btn.dataset.color);
   setColor(btn.dataset.color);
 }));
-$('customColorPicker').addEventListener('input', (e) => setColor(e.target.value));
+$('customColorPicker').addEventListener('input', (e) => { customColorSwatch.style.background = e.target.value; setColor(e.target.value); });
 $('customColorPicker').addEventListener('change', () => { App.styleEditOpen = false; });
 
 document.querySelectorAll('#textStyleControls [data-font-family]').forEach((btn) => {
