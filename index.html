@@ -214,6 +214,10 @@
     .eyedrop-btn:hover { background: rgb(var(--hairline)); color: rgb(var(--fg)); }
     .eyedrop-btn.active { background: rgb(var(--accent) / 0.18); color: rgb(var(--accent-hi)); box-shadow: 0 0 0 1px rgb(var(--accent) / 0.4); }
     canvas.annotation-layer.sampling-cursor { cursor: crosshair; }
+    .kb-edit-btn, .kb-reset-btn { width: 20px; height: 20px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; flex: none; color: rgb(var(--faint)); transition: background 0.12s, color 0.12s; }
+    .kb-edit-btn:hover, .kb-reset-btn:hover { background: rgb(var(--hairline)); color: rgb(var(--fg)); }
+    .kb-edit-btn.capturing { background: rgb(var(--accent) / 0.18); color: rgb(var(--accent-hi)); }
+    kbd.kb-current { min-width: 2.4em; text-align: center; }
     .seg { padding: 0.375rem 0.75rem; font-size: 0.75rem; font-weight: 600; border-radius: 0.5rem; color: rgb(var(--muted)); }
     .seg.active { background: rgb(var(--raised)); color: rgb(var(--fg)); box-shadow: inset 0 0 0 1px rgb(var(--hairline2)); }
     .thumb-item.current .thumb-frame { box-shadow: 0 0 0 2px #d3923c; }
@@ -325,7 +329,7 @@
           <span id="customColorSwatch" class="color-input-swatch" style="background:#ef4444"></span>
           <input type="color" id="customColorPicker" value="#ef4444" class="color-input" aria-label="Custom color" />
         </span>
-        <button id="btnEyedrop" class="eyedrop-btn" title="Pick exact color from the page (reads the rendered pixel, not your screen)" aria-label="Pick exact color from the page" aria-pressed="false">
+        <button id="btnEyedrop" class="eyedrop-btn" title="Pick exact color from the page (I) — reads the rendered pixel, not your screen" aria-label="Pick exact color from the page" aria-pressed="false">
           <i data-lucide="pipette" class="w-3.5 h-3.5"></i>
         </button>
       </div>
@@ -574,12 +578,16 @@
   <!-- HELP / SHORTCUTS MODAL -->
   <div id="helpModal" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
     <div class="bg-surface border border-hairline2 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl max-h-[85vh] flex flex-col modal-pop">
-      <div class="p-4 border-b border-hairline flex justify-between items-center shrink-0">
+      <div class="p-4 border-b border-hairline flex justify-between items-center shrink-0 gap-2">
         <h3 id="helpTitle" class="font-display text-base text-fg">Keyboard shortcuts</h3>
-        <button id="btnCloseHelp" aria-label="Close" class="text-muted hover:text-fg"><i data-lucide="x" class="w-4 h-4"></i></button>
+        <div class="flex items-center gap-3 shrink-0">
+          <button id="btnResetKeybinds" class="text-[11px] text-muted hover:text-fg underline decoration-dotted underline-offset-2 transition">Reset all</button>
+          <button id="btnCloseHelp" aria-label="Close" class="text-muted hover:text-fg"><i data-lucide="x" class="w-4 h-4"></i></button>
+        </div>
       </div>
       <div class="p-4 overflow-y-auto text-xs space-y-1">
-        <div id="helpGrid" class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2"></div>
+        <p class="text-muted pb-1">Click the pencil to change a shortcut — press any key to set it, Esc to cancel.</p>
+        <div id="helpGrid" class="grid grid-cols-[auto_1fr_auto] gap-x-3 gap-y-2 items-center"></div>
         <p class="text-muted pt-3 border-t border-hairline mt-3 leading-relaxed">
           With the Select tool, click a shape to move it, drag any of its points to reshape it, or click the red badge to delete it. Curved lines have a third point in the middle — drag it to bend the curve. Double-click (or double-tap) text to edit it, and use the arrow keys to nudge. Hold Shift while drawing a line, arrow, curve, rectangle or circle to snap the angle or make it square. Changing the colour or size while something is selected restyles it. Right-click any mark, in any tool, for Duplicate / Bring to Front / Send to Back / Delete. Hold the middle mouse button anywhere to pan without switching tools. On touch screens, use the Pan tool to scroll the page.
         </p>
@@ -2171,6 +2179,10 @@ function updateSamplingCursor() {
   btnEyedrop.classList.toggle('active', App.sampling);
   btnEyedrop.setAttribute('aria-pressed', String(App.sampling));
 }
+function toggleSampling(force) {
+  App.sampling = typeof force === 'boolean' ? force : !App.sampling;
+  updateSamplingCursor();
+}
 
 function constrainShape(s) {
   const dx = s.x2 - s.x1, dy = s.y2 - s.y1;
@@ -2196,8 +2208,7 @@ function onPointerDown(e) {
 
   if (App.sampling) {
     const hex = sampleColorAt(pageNum, e);
-    App.sampling = false;
-    updateSamplingCursor();
+    toggleSampling(false);
     if (hex) { setCustomColorPickerValue(hex); setColor(hex); showToast(`Picked ${hex.toUpperCase()}`); }
     else showToast('Could not read a color there — try again.');
     e.preventDefault();
@@ -2556,6 +2567,7 @@ function updateCommentsUI() {
 // TOOLBAR: tools, colour, size, opacity
 // =======================================================================
 function setTool(tool) {
+  if (App.sampling) toggleSampling(false);
   closeTextEditor(true);
   App.activeTool = tool;
   syncToolAttr();
@@ -3020,31 +3032,164 @@ async function importProject(file) {
 }
 
 // =======================================================================
-// HELP MODAL
+// KEYBINDS — remappable shortcuts, persisted to localStorage
+// =======================================================================
+const KEYBIND_STORAGE_KEY = 'acromark.keymap.v1';
+const KEYBIND_ACTIONS = [
+  { id: 'select', label: 'Select, move & resize', default: { key: 'v', mod: false, shift: false } },
+  { id: 'hand', label: 'Pan (or hold Space)', default: { key: 'g', mod: false, shift: false } },
+  { id: 'pen', label: 'Freehand pen', default: { key: 'p', mod: false, shift: false } },
+  { id: 'highlighter', label: 'Highlighter', default: { key: 'h', mod: false, shift: false } },
+  { id: 'arrow', label: 'Arrow', default: { key: 'a', mod: false, shift: false } },
+  { id: 'line', label: 'Line', default: { key: 'l', mod: false, shift: false } },
+  { id: 'rect', label: 'Rectangle', default: { key: 'r', mod: false, shift: false } },
+  { id: 'circle', label: 'Circle', default: { key: 'c', mod: false, shift: false } },
+  { id: 'text', label: 'Text box', default: { key: 't', mod: false, shift: false } },
+  { id: 'comment', label: 'Comment pin', default: { key: 'n', mod: false, shift: false } },
+  { id: 'signature', label: 'Signature', default: { key: 's', mod: false, shift: false } },
+  { id: 'eraser', label: 'Eraser', default: { key: 'e', mod: false, shift: false } },
+  { id: 'eyedrop', label: 'Pixel eyedropper', default: { key: 'i', mod: false, shift: false } },
+  { id: 'deleteSelected', label: 'Delete selected item', default: { key: 'delete', mod: false, shift: false } },
+  { id: 'duplicate', label: 'Duplicate selected item', default: { key: 'd', mod: true, shift: false } },
+  { id: 'bringFront', label: 'Bring selected item to front', default: { key: ']', mod: true, shift: false } },
+  { id: 'sendBack', label: 'Send selected item to back', default: { key: '[', mod: true, shift: false } },
+  { id: 'undo', label: 'Undo', default: { key: 'z', mod: true, shift: false } },
+  { id: 'redo', label: 'Redo', default: { key: 'z', mod: true, shift: true } },
+  { id: 'exportPdf', label: 'Export annotated PDF', default: { key: 's', mod: true, shift: false } },
+  { id: 'zoomIn', label: 'Zoom in', default: { key: '=', mod: false, shift: false } },
+  { id: 'zoomOut', label: 'Zoom out', default: { key: '-', mod: false, shift: false } },
+  { id: 'resetZoom', label: 'Reset zoom', default: { key: '0', mod: false, shift: false } },
+  { id: 'toggleHelp', label: 'This panel', default: { key: '?', mod: false, shift: false } }
+];
+// A few keys always work as a convenience alongside whatever's customised above — mirrors
+// what the app already relied on before shortcuts became remappable (Backspace as well as
+// Delete, Ctrl+Y as well as Ctrl+Shift+Z, "+"/"_" as well as "="/"-").
+const KEYBIND_FIXED_ROWS = [
+  ['Shift', 'Snap angle / make square while drawing'],
+  ['Backspace', 'Also deletes the selected item'],
+  ['Arrows', 'Nudge selected item (Shift = 10×)'],
+  ['Enter', 'Edit selected text'],
+  ['Right-click', 'Duplicate / reorder / delete menu'],
+  ['Middle-drag', 'Pan (any tool)'],
+  ['Esc', 'Deselect / cancel / close']
+];
+const TOOL_ACTION_IDS = new Set(['select', 'hand', 'pen', 'highlighter', 'arrow', 'line', 'rect', 'circle', 'text', 'comment', 'eraser']);
+const KEYBIND_HANDLERS = {
+  signature: () => openSignatureModal(),
+  eyedrop: () => toggleSampling(),
+  deleteSelected: () => { if (App.selected) deleteSelectedAnnotation(); },
+  duplicate: () => { if (App.selected) duplicateSelectedAnnotation(); },
+  bringFront: () => { if (App.selected) reorderSelectedAnnotation(true); },
+  sendBack: () => { if (App.selected) reorderSelectedAnnotation(false); },
+  undo: () => undo(),
+  redo: () => redo(),
+  exportPdf: () => exportAnnotatedPdf(),
+  zoomIn: () => stepZoom(1),
+  zoomOut: () => stepZoom(-1),
+  resetZoom: () => setScale(1.25),
+  toggleHelp: () => toggleHelpModal()
+};
+function runKeybindAction(id) { if (TOOL_ACTION_IDS.has(id)) setTool(id); else if (KEYBIND_HANDLERS[id]) KEYBIND_HANDLERS[id](); }
+function defaultKeymap() { const m = {}; KEYBIND_ACTIONS.forEach((a) => { m[a.id] = { ...a.default }; }); return m; }
+function loadKeymap() {
+  const map = defaultKeymap();
+  try {
+    const saved = JSON.parse(localStorage.getItem(KEYBIND_STORAGE_KEY) || '{}');
+    KEYBIND_ACTIONS.forEach((a) => {
+      const s = saved[a.id];
+      if (s && typeof s.key === 'string') map[a.id] = { key: s.key, mod: !!s.mod, shift: !!s.shift };
+    });
+  } catch (err) { /* corrupt or unavailable storage — fall back to defaults */ }
+  return map;
+}
+function saveKeymap() { try { localStorage.setItem(KEYBIND_STORAGE_KEY, JSON.stringify(App.keymap)); } catch (err) { /* customisation just won't persist this session */ } }
+function matchesBinding(key, mod, shiftKey, binding) {
+  if (!binding || key !== binding.key || mod !== !!binding.mod) return false;
+  return binding.mod ? !!binding.shift === !!shiftKey : true;   // shift only disambiguates modifier chords
+}
+function bindingsEqual(a, b) { return !!a && !!b && a.key === b.key && !!a.mod === !!b.mod && (a.mod ? !!a.shift === !!b.shift : true); }
+function bindingLabel(b) {
+  if (!b) return '—';
+  const names = { delete: 'Del', ' ': 'Space' };
+  const k = names[b.key] || (b.key.length === 1 ? b.key.toUpperCase() : b.key);
+  const parts = [];
+  if (b.mod) parts.push('Ctrl');
+  if (b.mod && b.shift) parts.push('Shift');
+  parts.push(k);
+  return parts.join('+');
+}
+function findKeybindConflict(binding, excludeId) {
+  return KEYBIND_ACTIONS.find((a) => a.id !== excludeId && bindingsEqual(App.keymap[a.id], binding));
+}
+App.keymap = loadKeymap();
+
+// =======================================================================
+// HELP / KEYBINDS MODAL
 // =======================================================================
 const helpModal = $('helpModal');
-(function buildHelp() {
-  const rows = [
-    ['V', 'Select, move & resize'], ['G', 'Pan (or hold Space)'], ['P', 'Freehand pen'], ['H', 'Highlighter'],
-    ['A', 'Arrow'], ['L', 'Line'], ['R', 'Rectangle'], ['C', 'Circle'], ['T', 'Text box'], ['N', 'Comment pin'],
-    ['S', 'Signature'], ['E', 'Eraser'], ['Shift', 'Snap angle / make square while drawing'],
-    ['Del', 'Delete selected item'], ['Arrows', 'Nudge selected item (Shift = 10×)'], ['Enter', 'Edit selected text'],
-    ['Ctrl+D', 'Duplicate selected item'], ['Ctrl+]', 'Bring selected item to front'], ['Ctrl+[', 'Send selected item to back'],
-    ['Right-click', 'Duplicate / reorder / delete menu'], ['Middle-drag', 'Pan (any tool)'],
-    ['Ctrl+Z', 'Undo'], ['Ctrl+Shift+Z', 'Redo'], ['Ctrl+S', 'Export annotated PDF'], ['Esc', 'Deselect / cancel / close'],
-    ['+ / -', 'Zoom in / out (Ctrl + scroll works too)'], ['0', 'Reset zoom'], ['?', 'This panel']
-  ];
-  const grid = $('helpGrid');
-  rows.forEach(([k, d]) => {
+const helpGrid = $('helpGrid');
+let capturingActionId = null;
+function renderKeybindsList() {
+  helpGrid.innerHTML = '';
+  const addRow = (kbdText, label, buttonsHtml) => {
     const kbd = document.createElement('kbd');
-    kbd.className = 'justify-self-start bg-raised border border-hairline2 rounded px-2 py-0.5';
-    kbd.textContent = k;
+    kbd.className = 'kb-current justify-self-start bg-raised border border-hairline2 rounded px-2 py-0.5';
+    kbd.textContent = kbdText;
     const span = document.createElement('span');
     span.className = 'text-fg/80 self-center';
-    span.textContent = d;
-    grid.append(kbd, span);
+    span.textContent = label;
+    const cell = document.createElement('div');
+    cell.className = 'flex items-center gap-0.5 justify-self-end';
+    cell.innerHTML = buttonsHtml || '';
+    helpGrid.append(kbd, span, cell);
+  };
+  KEYBIND_ACTIONS.forEach((a) => {
+    const current = App.keymap[a.id];
+    const isCapturing = capturingActionId === a.id;
+    const changed = !bindingsEqual(current, a.default);
+    addRow(
+      isCapturing ? 'Press a key…' : bindingLabel(current),
+      a.label,
+      `<button class="kb-edit-btn${isCapturing ? ' capturing' : ''}" data-kb-edit="${a.id}" title="Change shortcut" aria-label="Change shortcut for ${a.label}"><i data-lucide="pencil" class="w-3 h-3"></i></button>` +
+      (changed ? `<button class="kb-reset-btn" data-kb-reset="${a.id}" title="Reset to default" aria-label="Reset shortcut for ${a.label}"><i data-lucide="rotate-ccw" class="w-3 h-3"></i></button>` : '')
+    );
   });
-})();
+  KEYBIND_FIXED_ROWS.forEach(([k, d]) => addRow(k, d, ''));
+  renderIcons();
+}
+helpGrid.addEventListener('click', (e) => {
+  const editBtn = e.target.closest('[data-kb-edit]');
+  const resetBtn = e.target.closest('[data-kb-reset]');
+  if (editBtn) { capturingActionId = editBtn.dataset.kbEdit; renderKeybindsList(); armKeybindCapture(); }
+  else if (resetBtn) {
+    const a = KEYBIND_ACTIONS.find((x) => x.id === resetBtn.dataset.kbReset);
+    if (a) { App.keymap[a.id] = { ...a.default }; saveKeymap(); renderKeybindsList(); }
+  }
+});
+function armKeybindCapture() {
+  const onKey = (e) => {
+    e.preventDefault(); e.stopImmediatePropagation();
+    const id = capturingActionId;
+    capturingActionId = null;
+    if (e.key === 'Escape') { renderKeybindsList(); return; }
+    if (['control', 'shift', 'alt', 'meta'].includes(e.key.toLowerCase())) { renderKeybindsList(); return; }
+    const binding = { key: e.key.toLowerCase(), mod: e.ctrlKey || e.metaKey, shift: e.shiftKey };
+    const conflict = findKeybindConflict(binding, id);
+    if (conflict) { showToast(`"${bindingLabel(binding)}" is already used by ${conflict.label}.`); renderKeybindsList(); return; }
+    App.keymap[id] = binding;
+    saveKeymap();
+    renderKeybindsList();
+  };
+  window.addEventListener('keydown', onKey, { capture: true, once: true });
+}
+$('btnResetKeybinds').addEventListener('click', async () => {
+  const ok = await openConfirm({ title: 'Reset all shortcuts?', message: 'Every keyboard shortcut goes back to its default key.', confirmLabel: 'Reset' });
+  if (!ok) return;
+  App.keymap = defaultKeymap();
+  saveKeymap();
+  renderKeybindsList();
+});
+renderKeybindsList();
 function toggleHelpModal() { helpModal.classList.toggle('hidden'); }
 function closeHelpModal() { helpModal.classList.add('hidden'); }
 
@@ -3056,7 +3201,7 @@ function anyModalOpen() {
 }
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    if (App.sampling) { App.sampling = false; updateSamplingCursor(); return; }
+    if (App.sampling) { toggleSampling(false); return; }
     if (!confirmModal.classList.contains('hidden')) { closeConfirm(false); return; }
     if (!signatureModal.classList.contains('hidden')) { closeSignatureModal(); return; }
     if (!addCommentModal.classList.contains('hidden')) { closeAddCommentModal(); return; }
@@ -3089,6 +3234,7 @@ window.addEventListener('keydown', (e) => {
   }
   const toolMap = { v: 'select', g: 'hand', p: 'pen', h: 'highlighter', a: 'arrow', l: 'line', r: 'rect', c: 'circle', t: 'text', n: 'comment', e: 'eraser' };
   if (toolMap[key]) { setTool(toolMap[key]); return; }
+  if (key === 'i') { toggleSampling(); return; }
   if (key === 's') { openSignatureModal(); return; }
   if ((key === 'delete' || key === 'backspace') && App.selected) { e.preventDefault(); deleteSelectedAnnotation(); return; }
   if (key === 'enter' && App.selected) {
@@ -3191,7 +3337,7 @@ document.querySelectorAll('#colorPalette .swatch').forEach((btn) => btn.addEvent
 }));
 $('customColorPicker').addEventListener('input', (e) => { customColorSwatch.style.background = e.target.value; setColor(e.target.value); });
 $('customColorPicker').addEventListener('change', () => { App.styleEditOpen = false; });
-btnEyedrop.addEventListener('click', () => { App.sampling = !App.sampling; updateSamplingCursor(); });
+btnEyedrop.addEventListener('click', () => toggleSampling());
 
 document.querySelectorAll('#textStyleControls [data-font-family]').forEach((btn) => {
   btn.addEventListener('click', () => applyTextStyle({ fontFamily: btn.dataset.fontFamily }));
