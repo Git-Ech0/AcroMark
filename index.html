@@ -205,6 +205,10 @@
        actually see with a plain background-color span underneath, which is exact by construction. */
     .color-input-wrap { position: relative; width: 22px; height: 22px; display: inline-flex; cursor: pointer; flex: none; }
     .color-input-swatch { position: absolute; inset: 0; border-radius: 9999px; border: 1px solid rgb(var(--hairline2)); pointer-events: none; }
+    /* Mirrors .swatch.active so a custom (off-palette) colour gets the same selection ring as a
+       preset swatch — otherwise picking a custom colour left every circle in the bar looking
+       "unselected" even while it was the one actually in use. */
+    .color-input-wrap.active .color-input-swatch { box-shadow: 0 0 0 2px rgb(var(--canvas)), 0 0 0 4px rgb(var(--accent)); }
     .color-input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; opacity: 0; cursor: pointer; }
     .seg { padding: 0.375rem 0.75rem; font-size: 0.75rem; font-weight: 600; border-radius: 0.5rem; color: rgb(var(--muted)); }
     .seg.active { background: rgb(var(--raised)); color: rgb(var(--fg)); box-shadow: inset 0 0 0 1px rgb(var(--hairline2)); }
@@ -313,7 +317,7 @@
         <button class="swatch" style="background:#10b981" data-color="#10b981" title="Green" aria-label="Green"></button>
         <button class="swatch" style="background:#3b82f6" data-color="#3b82f6" title="Blue" aria-label="Blue"></button>
         <button class="swatch" style="background:#a855f7" data-color="#a855f7" title="Purple" aria-label="Purple"></button>
-        <span class="color-input-wrap ml-1" title="Custom color">
+        <span class="color-input-wrap ml-1" id="customColorWrap" title="Custom color">
           <span id="customColorSwatch" class="color-input-swatch" style="background:#ef4444"></span>
           <input type="color" id="customColorPicker" value="#ef4444" class="color-input" aria-label="Custom color" />
         </span>
@@ -1007,9 +1011,17 @@ const opacityValueLabel = $('opacityValueLabel');
 const colorPaletteEl = $('colorPalette');
 const customColorPicker = $('customColorPicker');
 const customColorSwatch = $('customColorSwatch');
+const customColorWrap = $('customColorWrap');
 // Keeps the native <input type="color"> in sync for when the OS picker opens, and paints the
 // visible chip via plain background-color so it's never subject to the widget's own theming.
 function setCustomColorPickerValue(hex) { customColorPicker.value = hex; customColorSwatch.style.background = hex; }
+// The custom swatch represents "whatever colour isn't one of the presets", so it should show the
+// active ring exactly when the current colour doesn't match any preset button — otherwise a
+// custom colour leaves the whole bar looking unselected even though it's the one drawing.
+function syncCustomSwatchActive(hex) {
+  const isPreset = Array.from(colorPaletteEl.querySelectorAll('.swatch')).some((b) => b.dataset.color === hex);
+  customColorWrap.classList.toggle('active', !isPreset);
+}
 const btnUndo = $('btnUndo');
 const btnRedo = $('btnRedo');
 const fileInputEl = $('fileInput');
@@ -2556,6 +2568,7 @@ function refreshControls() {
   // never shows a stale colour left over from the last thing you drew.
   const currentColor = activeTextEditor ? activeTextEditor.getStyle().color : (sel && sel.color) ? sel.color : App.color;
   colorPaletteEl.querySelectorAll('.swatch').forEach((b) => b.classList.toggle('active', b.dataset.color === currentColor));
+  syncCustomSwatchActive(currentColor);
   setCustomColorPickerValue(currentColor);
   let mode = 'stroke';
   if (sel) mode = sel.type === 'text' ? 'text' : sel.type === 'highlighter' ? 'highlighter' : sel.type === 'image' ? 'none' : 'stroke';
@@ -2586,6 +2599,7 @@ function refreshControls() {
 }
 function setColor(hex) {
   document.querySelectorAll('#colorPalette .swatch').forEach((b) => b.classList.toggle('active', b.dataset.color === hex));
+  syncCustomSwatchActive(hex);
   if (activeTextEditor) { App.color = hex; activeTextEditor.setStyle({ color: hex }); return; }
   App.color = hex;
   const sel = getSelectedAnnotation();
