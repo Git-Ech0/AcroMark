@@ -390,6 +390,10 @@
         <i data-lucide="trash" class="w-3.5 h-3.5"></i>
         <span>Clear Page</span>
       </button>
+      <button id="btnConvertPageText" class="flex items-center gap-1 px-2 py-1 bg-raised hover:bg-hairline rounded transition text-fg/80 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-raised" title="Turn every piece of text in this document into a real, editable text box">
+        <i data-lucide="wand-2" class="w-3.5 h-3.5"></i>
+        <span>Text &rarr; Boxes</span>
+      </button>
     </div>
   </div>
 
@@ -1013,53 +1017,6 @@ function scriptFontSize(a) { return (a.superscript || a.subscript) ? a.fontSize 
 function scriptBaselineShift(a) {
   return a.superscript ? -a.fontSize * SUPERSCRIPT_SHIFT_RATIO : a.subscript ? a.fontSize * SUBSCRIPT_SHIFT_RATIO : 0;
 }
-// ---------------------------------------------------------------------------------------------
-// RICH TEXT RUNS — a text annotation is still, first and foremost, one uniform style (the fields
-// above) applied to `a.text` as a whole — that's what a manually-typed box is, and it's what every
-// function above already handles. `a.runs`, when present, is an *addition* on top of that: an
-// array with one entry per line of `a.text`, each entry an array of `{ text, ...styleOverrides }`
-// runs whose concatenation (in order) reproduces that line. A run only needs to carry the fields
-// that differ from the annotation's own — resolveRunStyle() below fills in the rest — so a
-// paragraph that's 95% plain and has one bold word only spends extra data on that one word.
-// This is what lets one box hold, say, normal body text with a smaller raised footnote marker
-// in the middle of it, which is exactly what Text Sensing now hands over for text like that,
-// and what the rich inline editor (openTextEditor) lets a person build and edit by hand.
-// ---------------------------------------------------------------------------------------------
-function resolveRunStyle(a, run) {
-  return {
-    fontFamily: run.fontFamily || a.fontFamily,
-    bold: run.bold !== undefined ? run.bold : a.bold !== false,
-    italic: run.italic !== undefined ? run.italic : !!a.italic,
-    underline: run.underline !== undefined ? run.underline : !!a.underline,
-    superscript: !!run.superscript, subscript: !!run.subscript,
-    color: run.color || a.color,
-    // An explicit run.fontSize is already the exact size this run should render at (typically a
-    // size measured straight off the real PDF glyphs, for a sensed run) — nothing further is
-    // applied to it. One that isn't given falls back to the annotation's own nominal size, with
-    // the same auto-shrink a whole-annotation superscript/subscript toggle gets.
-    fontSize: run.fontSize != null ? run.fontSize : ((run.superscript || run.subscript) ? a.fontSize * SCRIPT_SIZE_SCALE : a.fontSize)
-  };
-}
-// A run's baseline shift is always measured against the annotation's own nominal size (the
-// surrounding "host" text), never the run's own — often already-shrunk — size, so a raised run
-// sits at the same visual height a plain superscript toggle would put it at, not a different one.
-function runBaselineShift(a, run) {
-  return run.superscript ? -a.fontSize * SUPERSCRIPT_SHIFT_RATIO : run.subscript ? a.fontSize * SUBSCRIPT_SHIFT_RATIO : 0;
-}
-// Measures one rich line (array of runs) in document units (scale 1) using `ctx` as the
-// measuring context. Every place that lays a rich line out — on-canvas, in the exported PDF, in
-// the live inline editor's auto-sizing — starts from this so the three never drift apart.
-function measureRichLine(a, lineRuns, ctx) {
-  let width = 0;
-  const parts = lineRuns.map((run) => {
-    const rs = resolveRunStyle(a, run);
-    ctx.font = canvasFontString(rs, rs.fontSize);
-    const w = ctx.measureText(run.text).width;
-    width += w;
-    return { run, rs, w, shift: runBaselineShift(a, run) };
-  });
-  return { parts, width };
-}
 const HEX_RE = /^#[0-9a-f]{6}$/i;
 const ZOOM_LEVELS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4];
 const MAX_CANVAS_PIXELS = 7e6;   // keeps big pages inside mobile canvas limits
@@ -1603,16 +1560,11 @@ function drawAnnotation(ctx, a, s, pageNum) {
 // down to the annotation's real font size — one measurement pass covers width, alignment offsets
 // and the bounding box together.
 function measureTextLines(a) {
-  const lines = String(a.text).split('\n');
-  if (a.runs) {
-    const rich = a.runs.map((lineRuns) => measureRichLine(a, lineRuns, measureCtx));
-    const widths = rich.map((r) => r.width);
-    return { lines, widths, maxW: Math.max(0, ...widths), rich };
-  }
   measureCtx.font = canvasFontString(a, 100);
+  const lines = String(a.text).split('\n');
   const fs = scriptFontSize(a);
   const widths = lines.map((l) => measureCtx.measureText(l).width * fs / 100);
-  return { lines, widths, maxW: Math.max(0, ...widths), rich: null };
+  return { lines, widths, maxW: Math.max(0, ...widths) };
 }
 function textMetrics(a) {
   const m = measureTextLines(a);
@@ -3001,7 +2953,11 @@ function clusterTextItems(raw, pageNum, opts) {
   if (!lineRecs.length) return [];
 
   // ---- lines -> paragraph blocks: merge consecutive same-angle lines that are close enough
-  // together, in a similar enough size, to plausibly be the same paragraph ----
+  // together, in a similar enough size, and in the *same style*, to plausibly be the same
+  // paragraph. The style check matters as much as the geometry ones: each resulting block becomes
+  // one flat-style annotation, so a bold label line or an italic aside sitting between plain body
+  // lines has to start its own block — merged in, its formatting would just be outvoted and lost
+  // rather than reproduced.
   const blocks = [];
   if (opts && opts.singleBlock) {
     const b = { lines: lineRecs, x1: Infinity, y1: Infinity, x2: -Infinity, y2: -Infinity, angle: lineRecs[0].angle };
@@ -3014,7 +2970,8 @@ function clusterTextItems(raw, pageNum, opts) {
         const gap = ln.baseY - cur.lastBaseY;
         const sameSize = ln.fontHeight > 0 && cur.lastFontHeight > 0 &&
           ln.fontHeight / cur.lastFontHeight < 1.35 && cur.lastFontHeight / ln.fontHeight < 1.35;
-        if (sameSize && gap > 0 && gap <= cur.lastFontHeight * 2.15) {
+        const sameStyle = ln.fontFamily === cur.lastFontFamily && ln.bold === cur.lastBold && ln.italic === cur.lastItalic;
+        if (sameSize && sameStyle && gap > 0 && gap <= cur.lastFontHeight * 2.15) {
           cur.lines.push(ln);
           cur.x1 = Math.min(cur.x1, ln.x1); cur.y1 = Math.min(cur.y1, ln.y1);
           cur.x2 = Math.max(cur.x2, ln.x2); cur.y2 = Math.max(cur.y2, ln.y2);
@@ -3022,10 +2979,15 @@ function clusterTextItems(raw, pageNum, opts) {
           continue;
         }
       }
-      cur = { lines: [ln], x1: ln.x1, y1: ln.y1, x2: ln.x2, y2: ln.y2, angle: ln.angle, lastBaseY: ln.baseY, lastFontHeight: ln.fontHeight };
+      cur = {
+        lines: [ln], x1: ln.x1, y1: ln.y1, x2: ln.x2, y2: ln.y2, angle: ln.angle,
+        lastBaseY: ln.baseY, lastFontHeight: ln.fontHeight,
+        lastFontFamily: ln.fontFamily, lastBold: ln.bold, lastItalic: ln.italic
+      };
       blocks.push(cur);
     }
   }
+
 
   return blocks.map((b) => {
     const first = b.lines[0];
@@ -3134,6 +3096,96 @@ async function ensureTextBlocks(n) {
   } finally {
     App.pageTextScanning[n] = false;
   }
+}
+// Two cover rects are "the same spot" if their corners are within a hair of each other — used
+// below to recognize a block that's already been converted, so re-running this on a page is a
+// no-op rather than stacking a second box on top of the first.
+function coverRectsClose(a, b) {
+  return Math.abs(a.x1 - b.x1) < 1.5 && Math.abs(a.y1 - b.y1) < 1.5 &&
+         Math.abs(a.x2 - b.x2) < 1.5 && Math.abs(a.y2 - b.y2) < 1.5;
+}
+// Figures out which of a page's already-detected blocks don't yet have a matching text-box
+// annotation, and returns the new annotation objects for them — not yet added to App state.
+// This is exactly what committing an unchanged sensed block produces (a whiteout patch plus a
+// text annotation matching its font, size, color, weight and alignment). Shared by the
+// single-page and whole-document conversions below so both use the same "already converted"
+// check and the same annotation shape.
+function blocksToNewAnnotations(pageNum, blocks) {
+  const list = App.pageAnnotations[pageNum] || [];
+  const replacedAnnotIds = new Set(list.filter((a) => a.type === 'text' && a.replacesAnnotId).map((a) => a.replacesAnnotId));
+  const toAdd = [];
+  for (const b of blocks) {
+    if (b.annotId) {
+      if (replacedAnnotIds.has(b.annotId)) continue;
+    } else if (list.some((a) => a.type === 'text' && a.coverRect && coverRectsClose(a.coverRect, b.bbox))) {
+      continue;
+    }
+    toAdd.push({
+      id: genId(), type: 'text', text: b.text, x: b.x, y: b.y,
+      color: b.color, fontSize: b.fontSize, fontFamily: b.fontFamily,
+      bold: !!b.bold, italic: !!b.italic, underline: false, superscript: false, subscript: false,
+      align: b.align || 'left',
+      coverRect: { ...b.bbox }, coverColor: b.bgColor || '#ffffff',
+      ...(b.annotId ? { replacesAnnotId: b.annotId } : {})
+    });
+  }
+  return toAdd;
+}
+// Turns every block the "Detect & Edit" tool would find on a page into a real, editable text-box
+// annotation right away, in one undo step. Safe to call more than once: a block that's already
+// been converted, or already hand-edited via the sense tool, is left alone rather than duplicated.
+async function convertPageTextToBoxes(pageNum) {
+  const blocks = await ensureTextBlocks(pageNum);
+  if (!blocks || !blocks.length) return 0;
+  const toAdd = blocksToNewAnnotations(pageNum, blocks);
+  if (!toAdd.length) return 0;
+  pushHistory();
+  (App.pageAnnotations[pageNum] || (App.pageAnnotations[pageNum] = [])).push(...toAdd);
+  requestRedraw(pageNum);
+  scheduleAutosave();
+  return toAdd.length;
+}
+// Runs the same conversion across every page in the document. Color sampling needs a page's own
+// rendered pixels, and most pages in anything beyond a couple screens long have never actually
+// been drawn — the viewer only renders what's near the current scroll position — so a page that
+// isn't already rendered gets rendered here first, then released again afterward, the same way
+// scrolling past it would. That keeps a long document from leaving every page's canvas resident
+// in memory at once; requestVisibleUpdate() at the end re-renders whatever the user is actually
+// looking at, in case the pass released a page that was on screen when it started but scrolled
+// off (or back on) mid-run. onProgress(n, numPages) is called before each page; returning false
+// from it cancels the rest of the run. The whole pass lands as a single undo step, not one per page.
+async function convertDocumentTextToBoxes(onProgress) {
+  if (!App.pdfDoc) return { pages: 0, added: 0, cancelled: false };
+  const numPages = App.numPages, gen = App.docGen;
+  const additions = new Map();
+  let cancelled = false;
+  for (let n = 1; n <= numPages; n++) {
+    if ((onProgress && onProgress(n, numPages) === false) || gen !== App.docGen) { cancelled = true; break; }
+    const st = App.pageState[n];
+    const wasRendered = !!(st && st.rendered);
+    if (!wasRendered) {
+      try { await renderPage(n, gen); } catch (err) { console.warn('AcroMark: could not render page', n, 'for conversion', err); }
+      if (gen !== App.docGen) { cancelled = true; break; }
+    }
+    let blocks = [];
+    try { blocks = await ensureTextBlocks(n); } catch (err) { console.warn('AcroMark: text detection failed on page', n, err); }
+    if (gen !== App.docGen) { cancelled = true; break; }
+    const toAdd = blocksToNewAnnotations(n, blocks || []);
+    if (toAdd.length) additions.set(n, toAdd);
+    if (!wasRendered) releasePage(n);
+  }
+  let added = 0;
+  if (additions.size) {
+    pushHistory();
+    for (const [n, toAdd] of additions) {
+      (App.pageAnnotations[n] || (App.pageAnnotations[n] = [])).push(...toAdd);
+      added += toAdd.length;
+      requestRedraw(n);
+    }
+    scheduleAutosave();
+  }
+  requestVisibleUpdate();
+  return { pages: additions.size, added, cancelled };
 }
 // Resolves what the "Detect & Edit Text" tool should treat as under the pointer at a page-space
 // point: an already sense-edited annotation first (so re-clicking edits the same box rather than
@@ -4194,6 +4246,37 @@ $('btnClearPage').addEventListener('click', async () => {
 });
 btnUndo.addEventListener('click', undo);
 btnRedo.addEventListener('click', redo);
+$('btnConvertPageText').addEventListener('click', async () => {
+  if (!App.pdfDoc) { showToast('Open a PDF first.'); return; }
+  const btn = $('btnConvertPageText');
+  btn.disabled = true;
+  let stopRequested = false;
+  const progress = showToast(`Converting page 1 of ${App.numPages}…`, {
+    persistent: true,
+    actions: [{ label: 'Cancel', onClick: () => { stopRequested = true; } }]
+  });
+  const msgEl = progress.querySelector('span');
+  try {
+    const result = await convertDocumentTextToBoxes((n, total) => {
+      if (stopRequested) return false;
+      msgEl.textContent = `Converting page ${n} of ${total}…`;
+    });
+    progress.remove();
+    if (result.cancelled) {
+      showToast(result.added ? `Cancelled — converted ${result.added} block${result.added === 1 ? '' : 's'} across ${result.pages} page${result.pages === 1 ? '' : 's'} before stopping.` : 'Cancelled — nothing was converted.');
+    } else if (result.added) {
+      showToast(`Converted ${result.added} block${result.added === 1 ? '' : 's'} of text to boxes across ${result.pages} page${result.pages === 1 ? '' : 's'}.`);
+    } else {
+      showToast('This document is already all text boxes.');
+    }
+  } catch (err) {
+    console.warn('AcroMark: convert-document-text failed', err);
+    progress.remove();
+    showToast('Could not finish converting this document — see console for details.');
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 $('btnConfirmOk').addEventListener('click', () => closeConfirm(true));
 $('btnConfirmCancel').addEventListener('click', () => closeConfirm(false));
