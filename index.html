@@ -210,6 +210,10 @@
        "unselected" even while it was the one actually in use. */
     .color-input-wrap.active .color-input-swatch { box-shadow: 0 0 0 2px rgb(var(--canvas)), 0 0 0 4px rgb(var(--accent)); }
     .color-input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; opacity: 0; cursor: pointer; }
+    .eyedrop-btn { width: 22px; height: 22px; border-radius: 9999px; display: inline-flex; align-items: center; justify-content: center; flex: none; color: rgb(var(--muted)); transition: background 0.12s, color 0.12s; }
+    .eyedrop-btn:hover { background: rgb(var(--hairline)); color: rgb(var(--fg)); }
+    .eyedrop-btn.active { background: rgb(var(--accent) / 0.18); color: rgb(var(--accent-hi)); box-shadow: 0 0 0 1px rgb(var(--accent) / 0.4); }
+    canvas.annotation-layer.sampling-cursor { cursor: crosshair; }
     .seg { padding: 0.375rem 0.75rem; font-size: 0.75rem; font-weight: 600; border-radius: 0.5rem; color: rgb(var(--muted)); }
     .seg.active { background: rgb(var(--raised)); color: rgb(var(--fg)); box-shadow: inset 0 0 0 1px rgb(var(--hairline2)); }
     .thumb-item.current .thumb-frame { box-shadow: 0 0 0 2px #d3923c; }
@@ -321,6 +325,9 @@
           <span id="customColorSwatch" class="color-input-swatch" style="background:#ef4444"></span>
           <input type="color" id="customColorPicker" value="#ef4444" class="color-input" aria-label="Custom color" />
         </span>
+        <button id="btnEyedrop" class="eyedrop-btn" title="Pick exact color from the page (reads the rendered pixel, not your screen)" aria-label="Pick exact color from the page" aria-pressed="false">
+          <i data-lucide="pipette" class="w-3.5 h-3.5"></i>
+        </button>
       </div>
     </div>
 
@@ -969,7 +976,8 @@ const App = {
 
   history: [], future: [],
   imageCache: {},
-  busy: false
+  busy: false,
+  sampling: false                      // true while the page-pixel eyedropper is armed
 };
 
 let idCounter = 1;
@@ -1011,6 +1019,7 @@ const opacityValueLabel = $('opacityValueLabel');
 const colorPaletteEl = $('colorPalette');
 const customColorPicker = $('customColorPicker');
 const customColorSwatch = $('customColorSwatch');
+const btnEyedrop = $('btnEyedrop');
 const customColorWrap = $('customColorWrap');
 // Keeps the native <input type="color"> in sync for when the OS picker opens, and paints the
 // visible chip via plain background-color so it's never subject to the widget's own theming.
@@ -2129,6 +2138,40 @@ function syncToolAttr() { document.body.dataset.tool = effectiveTool(); }
 function toolSupportsSelect(tool) { return tool === 'select' || tool === 'pen' || tool === 'highlighter' || SHAPE_TOOLS.includes(tool); }
 function getPos(canvas, e) { const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
 
+// ---- pixel eyedropper --------------------------------------------------
+// Reads the colour straight out of the already-rendered <canvas> pixel data
+// instead of the browser's native eyedropper, which samples the composited
+// *screen* and — on wide-gamut (P3) displays — reports that back tagged as
+// plain sRGB, shifting the hex value away from what was actually drawn.
+// Sampling the canvas bitmap directly sidesteps that colour-management
+// round trip entirely, so the picked hex always matches the pixel exactly.
+function samplePixel(canvasEl, e) {
+  if (!canvasEl) return null;
+  const rect = canvasEl.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+  if (cx < 0 || cy < 0 || cx > rect.width || cy > rect.height) return null;
+  const sx = canvasEl.width / rect.width, sy = canvasEl.height / rect.height;
+  const px = Math.min(canvasEl.width - 1, Math.max(0, Math.floor(cx * sx)));
+  const py = Math.min(canvasEl.height - 1, Math.max(0, Math.floor(cy * sy)));
+  try { return canvasEl.getContext('2d').getImageData(px, py, 1, 1).data; } catch (err) { return null; }
+}
+function sampleColorAt(pageNum, e) {
+  // Prefer whatever's on the annotation layer (an existing mark) at that spot;
+  // fall through to the rendered PDF page pixel underneath it when transparent.
+  const top = samplePixel(App.annotCanvases[pageNum], e);
+  const st = App.pageState[pageNum];
+  const under = samplePixel(st && st.pdfCanvas, e);
+  const d = (top && top[3] > 0) ? top : under;
+  if (!d) return null;
+  return '#' + [d[0], d[1], d[2]].map((v) => v.toString(16).padStart(2, '0')).join('');
+}
+function updateSamplingCursor() {
+  document.querySelectorAll('canvas.annotation-layer').forEach((c) => c.classList.toggle('sampling-cursor', App.sampling));
+  btnEyedrop.classList.toggle('active', App.sampling);
+  btnEyedrop.setAttribute('aria-pressed', String(App.sampling));
+}
+
 function constrainShape(s) {
   const dx = s.x2 - s.x1, dy = s.y2 - s.y1;
   if (s.type === 'line' || s.type === 'arrow' || s.type === 'arrow2' || s.type === 'curve') {
@@ -2150,6 +2193,17 @@ function onPointerDown(e) {
   const pos = getPos(canvas, e);
   App.activePage = pageNum;
   updatePageIndicator();
+
+  if (App.sampling) {
+    const hex = sampleColorAt(pageNum, e);
+    App.sampling = false;
+    updateSamplingCursor();
+    if (hex) { setCustomColorPickerValue(hex); setColor(hex); showToast(`Picked ${hex.toUpperCase()}`); }
+    else showToast('Could not read a color there — try again.');
+    e.preventDefault();
+    return;
+  }
+
   const tool = effectiveTool();
   const begin = (kind, extra = {}) => {
     App.gesture = { kind, pointerId: e.pointerId, pageNum, canvas, ...extra };
@@ -3002,6 +3056,7 @@ function anyModalOpen() {
 }
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (App.sampling) { App.sampling = false; updateSamplingCursor(); return; }
     if (!confirmModal.classList.contains('hidden')) { closeConfirm(false); return; }
     if (!signatureModal.classList.contains('hidden')) { closeSignatureModal(); return; }
     if (!addCommentModal.classList.contains('hidden')) { closeAddCommentModal(); return; }
@@ -3136,6 +3191,7 @@ document.querySelectorAll('#colorPalette .swatch').forEach((btn) => btn.addEvent
 }));
 $('customColorPicker').addEventListener('input', (e) => { customColorSwatch.style.background = e.target.value; setColor(e.target.value); });
 $('customColorPicker').addEventListener('change', () => { App.styleEditOpen = false; });
+btnEyedrop.addEventListener('click', () => { App.sampling = !App.sampling; updateSamplingCursor(); });
 
 document.querySelectorAll('#textStyleControls [data-font-family]').forEach((btn) => {
   btn.addEventListener('click', () => applyTextStyle({ fontFamily: btn.dataset.fontFamily }));
