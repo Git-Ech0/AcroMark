@@ -365,6 +365,8 @@
         <button type="button" id="btnTextBold" class="tool-btn" data-text-style="bold" title="Bold" aria-pressed="false"><i data-lucide="bold" class="w-4 h-4"></i></button>
         <button type="button" id="btnTextItalic" class="tool-btn" data-text-style="italic" title="Italic" aria-pressed="false"><i data-lucide="italic" class="w-4 h-4"></i></button>
         <button type="button" id="btnTextUnderline" class="tool-btn" data-text-style="underline" title="Underline" aria-pressed="false"><i data-lucide="underline" class="w-4 h-4"></i></button>
+        <button type="button" id="btnTextSuperscript" class="tool-btn" data-text-style="superscript" title="Superscript (Ctrl+Shift+=)" aria-pressed="false"><i data-lucide="superscript" class="w-4 h-4"></i></button>
+        <button type="button" id="btnTextSubscript" class="tool-btn" data-text-style="subscript" title="Subscript (Ctrl+=)" aria-pressed="false"><i data-lucide="subscript" class="w-4 h-4"></i></button>
       </div>
       <div class="flex items-center gap-0.5" role="group" aria-label="Text alignment">
         <button type="button" class="tool-btn" data-text-align="left" title="Align left" aria-pressed="false"><i data-lucide="align-left" class="w-4 h-4"></i></button>
@@ -912,22 +914,23 @@ async function buildAnnotatedPdf(opts) {
             }
             const txtFont = await resolveFont(a);
             const lines = String(a.text).split('\n');
+            const renderSize = scriptFontSize(a), baseShift = scriptBaselineShift(a);
             let encodable = true;
-            try { for (const ln of lines) txtFont.widthOfTextAtSize(ln, a.fontSize); } catch (e) { encodable = false; }
+            try { for (const ln of lines) txtFont.widthOfTextAtSize(ln, renderSize); } catch (e) { encodable = false; }
             if (encodable) {
-              const widths = lines.map((ln) => txtFont.widthOfTextAtSize(ln, a.fontSize));
+              const widths = lines.map((ln) => txtFont.widthOfTextAtSize(ln, renderSize));
               const maxW = Math.max(0, ...widths);
               const align = a.align || 'left';
               lines.forEach((ln, i) => {
                 if (!ln) return;
                 const dx = align === 'center' ? (maxW - widths[i]) / 2 : align === 'right' ? (maxW - widths[i]) : 0;
-                const lineY = a.y + i * a.fontSize * LINE_H;
+                const lineY = a.y + baseShift + i * a.fontSize * LINE_H;
                 const p = P(a.x + dx, lineY);
-                page.drawText(ln, { x: p.x, y: p.y, size: a.fontSize, font: txtFont, color, rotate: degrees(rot) });
+                page.drawText(ln, { x: p.x, y: p.y, size: renderSize, font: txtFont, color, rotate: degrees(rot) });
                 if (a.underline) {
-                  const uy = lineY + a.fontSize * 0.12;
+                  const uy = lineY + renderSize * 0.12;
                   const u1 = P(a.x + dx, uy), u2 = P(a.x + dx + widths[i], uy);
-                  page.drawLine({ start: u1, end: u2, thickness: Math.max(0.6, a.fontSize * 0.055), color, lineCap: LineCapStyle.Round });
+                  page.drawLine({ start: u1, end: u2, thickness: Math.max(0.6, renderSize * 0.055), color, lineCap: LineCapStyle.Round });
                 }
               });
             } else if (rasterize) {
@@ -994,10 +997,21 @@ const FONT_FAMILY_CSS = {
 };
 const FONT_FAMILIES = Object.keys(FONT_FAMILY_CSS);
 const TEXT_ALIGNS = ['left', 'center', 'right'];
-const TEXT_STYLE_KEYS = ['color', 'fontSize', 'fontFamily', 'bold', 'italic', 'underline', 'align'];
+const TEXT_STYLE_KEYS = ['color', 'fontSize', 'fontFamily', 'bold', 'italic', 'underline', 'superscript', 'subscript', 'align'];
 function textFontCss(a) { return FONT_FAMILY_CSS[a.fontFamily] || FONT_FAMILY_CSS.helvetica; }
 function canvasFontString(a, px) {
   return `${a.italic ? 'italic ' : ''}${a.bold === false ? 400 : 700} ${Math.max(1, px)}px ${textFontCss(a)}`;
+}
+// Superscript/subscript are whole-annotation toggles (like bold/italic), not per-character runs —
+// consistent with everything else a text annotation carries. Rendering it is just a smaller glyph
+// size plus a baseline shift, so every place that draws or measures annotation text (canvas, the
+// live inline editor, and the pdf-lib export) funnels through these two helpers.
+const SCRIPT_SIZE_SCALE = 0.7;        // glyph size while either toggle is on
+const SUPERSCRIPT_SHIFT_RATIO = 0.35; // baseline raised by this fraction of the nominal font size
+const SUBSCRIPT_SHIFT_RATIO = 0.14;   // baseline dropped by this fraction of the nominal font size
+function scriptFontSize(a) { return (a.superscript || a.subscript) ? a.fontSize * SCRIPT_SIZE_SCALE : a.fontSize; }
+function scriptBaselineShift(a) {
+  return a.superscript ? -a.fontSize * SUPERSCRIPT_SHIFT_RATIO : a.subscript ? a.fontSize * SUBSCRIPT_SHIFT_RATIO : 0;
 }
 const HEX_RE = /^#[0-9a-f]{6}$/i;
 const ZOOM_LEVELS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4];
@@ -1019,7 +1033,7 @@ const App = {
 
   activeTool: 'pen', spaceHeld: false,
   color: '#ef4444', strokeWidth: 3, highlighterWidth: 18, highlighterOpacity: 0.35, fontSize: 16,
-  fontFamily: 'helvetica', bold: true, italic: false, underline: false, align: 'left',
+  fontFamily: 'helvetica', bold: true, italic: false, underline: false, superscript: false, subscript: false, align: 'left',
 
   pageAnnotations: {},                 // n -> [annotation]  (geometry in document units = scale 1)
   comments: [],                        // {id, pageNum, x, y, text, createdAt}
@@ -1272,6 +1286,8 @@ function sanitizeAnnotation(raw) {
         bold: typeof raw.bold === 'boolean' ? raw.bold : true,
         italic: !!raw.italic,
         underline: !!raw.underline,
+        superscript: !!raw.superscript && !raw.subscript,
+        subscript: !!raw.subscript && !raw.superscript,
         align: TEXT_ALIGNS.includes(raw.align) ? raw.align : 'left'
       };
       const cr = raw.coverRect;
@@ -1502,21 +1518,23 @@ function drawAnnotation(ctx, a, s, pageNum) {
         ctx.restore();
       }
       ctx.fillStyle = a.color;
-      ctx.font = canvasFontString(a, a.fontSize * s);
+      const renderSize = scriptFontSize(a);
+      const baseShift = scriptBaselineShift(a);
+      ctx.font = canvasFontString(a, renderSize * s);
       ctx.textBaseline = 'alphabetic';
       const m = measureTextLines(a);
       const align = a.align || 'left';
       m.lines.forEach((ln, i) => {
         if (!ln) return;
         const dx = align === 'center' ? (m.maxW - m.widths[i]) / 2 : align === 'right' ? (m.maxW - m.widths[i]) : 0;
-        const lx = (a.x + dx) * s, ly = (a.y + i * a.fontSize * LINE_H) * s;
+        const lx = (a.x + dx) * s, ly = (a.y + baseShift + i * a.fontSize * LINE_H) * s;
         ctx.fillText(ln, lx, ly);
         if (a.underline) {
           ctx.save();
           ctx.strokeStyle = a.color;
-          ctx.lineWidth = Math.max(1, a.fontSize * s * 0.06);
+          ctx.lineWidth = Math.max(1, renderSize * s * 0.06);
           ctx.beginPath();
-          const uy = ly + a.fontSize * s * 0.12;
+          const uy = ly + renderSize * s * 0.12;
           ctx.moveTo(lx, uy); ctx.lineTo(lx + m.widths[i] * s, uy);
           ctx.stroke();
           ctx.restore();
@@ -1540,7 +1558,8 @@ function drawAnnotation(ctx, a, s, pageNum) {
 function measureTextLines(a) {
   measureCtx.font = canvasFontString(a, 100);
   const lines = String(a.text).split('\n');
-  const widths = lines.map((l) => measureCtx.measureText(l).width * a.fontSize / 100);
+  const fs = scriptFontSize(a);
+  const widths = lines.map((l) => measureCtx.measureText(l).width * fs / 100);
   return { lines, widths, maxW: Math.max(0, ...widths) };
 }
 function textMetrics(a) {
@@ -1572,7 +1591,8 @@ function getAnnotationBBox(a) {
     }
     case 'text': {
       const m = textMetrics(a);
-      const bb = { x1: a.x - 2, y1: a.y - a.fontSize, x2: a.x + m.w + 2, y2: a.y + (m.lines - 1) * a.fontSize * LINE_H + a.fontSize * 0.28 };
+      const fs = scriptFontSize(a), shift = scriptBaselineShift(a);
+      const bb = { x1: a.x - 2, y1: a.y + shift - fs, x2: a.x + m.w + 2, y2: a.y + shift + (m.lines - 1) * a.fontSize * LINE_H + fs * 0.28 };
       // A sensed-text edit's clickable/selectable area always includes the patch that hides the
       // original PDF text, even once the new text itself is shorter or shorter-lived than that patch.
       if (a.coverRect) {
@@ -2460,20 +2480,28 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
   const box = App.pageBoxes[pageNum];
   if (!box) return;
   const at = existing ? { x: existing.x, y: existing.y } : sensedBlock ? { x: sensedBlock.x, y: sensedBlock.y } : pdfPos;
-  // local, uncommitted style — every control (color, font, bold/italic/underline, align, size)
+  // local, uncommitted style — every control (color, font, bold/italic/underline/superscript/subscript, align, size)
   // previews live in the editor here and only lands on the real annotation when we commit below,
   // exactly like the text content itself (Escape discards style changes too, not just typing).
   const style = existing
     ? {
         color: existing.color, fontSize: existing.fontSize, fontFamily: existing.fontFamily || 'helvetica',
-        bold: existing.bold !== false, italic: !!existing.italic, underline: !!existing.underline, align: existing.align || 'left'
+        bold: existing.bold !== false, italic: !!existing.italic, underline: !!existing.underline,
+        superscript: !!existing.superscript, subscript: !!existing.subscript, align: existing.align || 'left'
       }
     : sensedBlock
     ? {
+        // Text sensing doesn't attempt to detect superscript/subscript from the real PDF glyphs
+        // (same as underline above) — it always starts a sensed edit at normal baseline, and the
+        // toggle is there for the person to apply if the detected text actually needs it.
         color: sensedBlock.color, fontSize: sensedBlock.fontSize, fontFamily: sensedBlock.fontFamily,
-        bold: !!sensedBlock.bold, italic: !!sensedBlock.italic, underline: false, align: sensedBlock.align || 'left'
+        bold: !!sensedBlock.bold, italic: !!sensedBlock.italic, underline: false,
+        superscript: false, subscript: false, align: sensedBlock.align || 'left'
       }
-    : { color: App.color, fontSize: App.fontSize, fontFamily: App.fontFamily, bold: App.bold, italic: App.italic, underline: App.underline, align: App.align };
+    : {
+        color: App.color, fontSize: App.fontSize, fontFamily: App.fontFamily, bold: App.bold, italic: App.italic,
+        underline: App.underline, superscript: App.superscript, subscript: App.subscript, align: App.align
+      };
   const original = { ...style };
   const originalText = existing ? existing.text : sensedBlock ? sensedBlock.text : '';
 
@@ -2487,7 +2515,8 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
   ta.style.left = `${at.x * App.scale - 3.5}px`;
 
   const fit = () => {
-    const fontPx = Math.max(16, style.fontSize * App.scale);
+    const fontPx = Math.max(16, scriptFontSize(style) * App.scale);
+    const shiftPx = scriptBaselineShift(style) * App.scale;
     ta.style.fontFamily = textFontCss(style);
     ta.style.fontWeight = style.bold ? '700' : '400';
     ta.style.fontStyle = style.italic ? 'italic' : 'normal';
@@ -2496,8 +2525,9 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
     ta.style.color = style.color;
     ta.style.fontSize = `${fontPx}px`;
     ta.style.lineHeight = String(LINE_H);
-    // align the editor's first baseline with where the annotation will be drawn
-    ta.style.top = `${at.y * App.scale - 2.5 - 0.97 * fontPx}px`;
+    // align the editor's first baseline with where the annotation will be drawn (including the
+    // raised/dropped baseline while superscript/subscript is on)
+    ta.style.top = `${at.y * App.scale + shiftPx - 2.5 - 0.97 * fontPx}px`;
     const lines = ta.value.split('\n');
     measureCtx.font = canvasFontString(style, fontPx);
     let w = 0;
@@ -2559,6 +2589,12 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
       if (k === 'b') { e.preventDefault(); api.setStyle({ bold: !style.bold }); syncTextStyleButtons(); return; }
       if (k === 'i') { e.preventDefault(); api.setStyle({ italic: !style.italic }); syncTextStyleButtons(); return; }
       if (k === 'u') { e.preventDefault(); api.setStyle({ underline: !style.underline }); syncTextStyleButtons(); return; }
+      // Ctrl+= toggles subscript, matching the shortcut most word processors use
+      if (e.key === '=') { e.preventDefault(); api.setStyle({ subscript: !style.subscript, superscript: false }); syncTextStyleButtons(); return; }
+    }
+    // Ctrl+Shift+= (Ctrl+Shift+Plus) toggles superscript, same convention
+    if (mod && e.shiftKey && !e.altKey && (e.key === '+' || e.key === '=')) {
+      e.preventDefault(); api.setStyle({ superscript: !style.superscript, subscript: false }); syncTextStyleButtons(); return;
     }
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); api.finish(true); }
     else if (e.key === 'Escape') { e.preventDefault(); api.finish(false); }
@@ -3249,12 +3285,23 @@ function currentTextStyle() {
   if (sel && sel.type === 'text') {
     return {
       color: sel.color, fontSize: sel.fontSize, fontFamily: sel.fontFamily || 'helvetica',
-      bold: sel.bold !== false, italic: !!sel.italic, underline: !!sel.underline, align: sel.align || 'left'
+      bold: sel.bold !== false, italic: !!sel.italic, underline: !!sel.underline,
+      superscript: !!sel.superscript, subscript: !!sel.subscript, align: sel.align || 'left'
     };
   }
-  return { color: App.color, fontSize: App.fontSize, fontFamily: App.fontFamily, bold: App.bold, italic: App.italic, underline: App.underline, align: App.align };
+  return {
+    color: App.color, fontSize: App.fontSize, fontFamily: App.fontFamily, bold: App.bold, italic: App.italic,
+    underline: App.underline, superscript: App.superscript, subscript: App.subscript, align: App.align
+  };
 }
-// Routes a text-style change (font family, bold/italic/underline, alignment) to wherever it
+// Superscript and subscript are mutually exclusive (like most word processors): turning one on
+// always turns the other off; turning one off just clears that one flag.
+function toggleTextScript(kind) {
+  const other = kind === 'superscript' ? 'subscript' : 'superscript';
+  const turningOn = !currentTextStyle()[kind];
+  applyTextStyle(turningOn ? { [kind]: true, [other]: false } : { [kind]: false });
+}
+// Routes a text-style change (font family, bold/italic/underline/superscript/subscript, alignment) to wherever it
 // belongs: the open editor if one is active, a selected text annotation, or the app defaults.
 function applyTextStyle(patch) {
   if (activeTextEditor) { activeTextEditor.setStyle(patch); syncTextStyleButtons(); return; }
@@ -3275,7 +3322,10 @@ function syncTextStyleButtons() {
     const on = b.dataset.fontFamily === st.fontFamily;
     b.classList.toggle('active', on); b.setAttribute('aria-pressed', on ? 'true' : 'false');
   });
-  [['btnTextBold', st.bold], ['btnTextItalic', st.italic], ['btnTextUnderline', st.underline]].forEach(([id, on]) => {
+  [
+    ['btnTextBold', st.bold], ['btnTextItalic', st.italic], ['btnTextUnderline', st.underline],
+    ['btnTextSuperscript', st.superscript], ['btnTextSubscript', st.subscript]
+  ].forEach(([id, on]) => {
     $(id).classList.toggle('active', !!on); $(id).setAttribute('aria-pressed', on ? 'true' : 'false');
   });
   document.querySelectorAll('#textStyleControls [data-text-align]').forEach((b) => {
@@ -4010,6 +4060,8 @@ document.querySelectorAll('#textStyleControls [data-font-family]').forEach((btn)
 $('btnTextBold').addEventListener('click', () => applyTextStyle({ bold: !currentTextStyle().bold }));
 $('btnTextItalic').addEventListener('click', () => applyTextStyle({ italic: !currentTextStyle().italic }));
 $('btnTextUnderline').addEventListener('click', () => applyTextStyle({ underline: !currentTextStyle().underline }));
+$('btnTextSuperscript').addEventListener('click', () => toggleTextScript('superscript'));
+$('btnTextSubscript').addEventListener('click', () => toggleTextScript('subscript'));
 document.querySelectorAll('#textStyleControls [data-text-align]').forEach((btn) => {
   btn.addEventListener('click', () => applyTextStyle({ align: btn.dataset.textAlign }));
 });
