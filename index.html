@@ -916,26 +916,46 @@ async function buildAnnotatedPdf(opts) {
                 { x: 0, y: 0, color: cc }
               );
             }
-            const txtFont = await resolveFont(a);
-            const lines = String(a.text).split('\n');
-            const renderSize = scriptFontSize(a), baseShift = scriptBaselineShift(a);
+            const lines = runsToLines(runsFromAnnotation(a));
             let encodable = true;
-            try { for (const ln of lines) txtFont.widthOfTextAtSize(ln, renderSize); } catch (e) { encodable = false; }
+            const laidLines = [];
+            outer:
+            for (const pieces of lines) {
+              const laidPieces = [];
+              for (const piece of pieces) {
+                if (!piece.text) continue;
+                const font = await resolveFont(piece);
+                const size = scriptFontSize(piece);
+                let w;
+                try { w = font.widthOfTextAtSize(piece.text, size); } catch (e) { encodable = false; break outer; }
+                laidPieces.push({ ...piece, font, size, w });
+              }
+              laidLines.push(laidPieces);
+            }
             if (encodable) {
-              const widths = lines.map((ln) => txtFont.widthOfTextAtSize(ln, renderSize));
-              const maxW = Math.max(0, ...widths);
               const align = a.align || 'left';
-              lines.forEach((ln, i) => {
-                if (!ln) return;
-                const dx = align === 'center' ? (maxW - widths[i]) / 2 : align === 'right' ? (maxW - widths[i]) : 0;
-                const lineY = a.y + baseShift + i * a.fontSize * LINE_H;
-                const p = P(a.x + dx, lineY);
-                page.drawText(ln, { x: p.x, y: p.y, size: renderSize, font: txtFont, color, rotate: degrees(rot) });
-                if (a.underline) {
-                  const uy = lineY + renderSize * 0.12;
-                  const u1 = P(a.x + dx, uy), u2 = P(a.x + dx + widths[i], uy);
-                  page.drawLine({ start: u1, end: u2, thickness: Math.max(0.6, renderSize * 0.055), color, lineCap: LineCapStyle.Round });
+              const lineWs = laidLines.map((pieces) => pieces.reduce((sum, p) => sum + p.w, 0));
+              const maxW = Math.max(0, ...lineWs);
+              let top = 0;
+              laidLines.forEach((pieces, li) => {
+                let lineH = 0;
+                pieces.forEach((p) => { lineH = Math.max(lineH, p.fontSize * LINE_H); });
+                if (!lineH) lineH = (a.fontSize || 16) * LINE_H;
+                const dx = align === 'center' ? (maxW - lineWs[li]) / 2 : align === 'right' ? (maxW - lineWs[li]) : 0;
+                let px = dx;
+                for (const piece of pieces) {
+                  const pieceColor = HEX_RE.test(piece.color) ? color01(piece.color) : color;
+                  const lineY = a.y + scriptBaselineShift(piece) + top;
+                  const pt = P(a.x + px, lineY);
+                  page.drawText(piece.text, { x: pt.x, y: pt.y, size: piece.size, font: piece.font, color: pieceColor, rotate: degrees(rot) });
+                  if (piece.underline) {
+                    const uy = lineY + piece.size * 0.12;
+                    const u1 = P(a.x + px, uy), u2 = P(a.x + px + piece.w, uy);
+                    page.drawLine({ start: u1, end: u2, thickness: Math.max(0.6, piece.size * 0.055), color: pieceColor, lineCap: LineCapStyle.Round });
+                  }
+                  px += piece.w;
                 }
+                top += lineH;
               });
             } else if (rasterize) {
               const r = await rasterize(a);
@@ -1016,6 +1036,89 @@ const SUBSCRIPT_SHIFT_RATIO = 0.14;   // baseline dropped by this fraction of th
 function scriptFontSize(a) { return (a.superscript || a.subscript) ? a.fontSize * SCRIPT_SIZE_SCALE : a.fontSize; }
 function scriptBaselineShift(a) {
   return a.superscript ? -a.fontSize * SUPERSCRIPT_SHIFT_RATIO : a.subscript ? a.fontSize * SUBSCRIPT_SHIFT_RATIO : 0;
+}
+
+// ---- rich text runs ----
+// A text annotation's look normally lives per *run* — a stretch of characters sharing one style —
+// rather than uniformly across the whole box, so selecting a word and hitting Bold only bolds that
+// word (see the inline editor below). `runs` is the source of truth whenever it's present; the flat
+// color/fontSize/fontFamily/bold/italic/underline/superscript/subscript fields a text annotation
+// also carries are kept in sync with its *first* run, purely as a cheap summary for code that only
+// ever needs "the" style of a box (the size slider, an object-selected style tweak, etc).
+const RUN_STYLE_KEYS = TEXT_STYLE_KEYS.filter((k) => k !== 'align');
+// Every place that draws or measures a text annotation's runs funnels through here, so an
+// annotation that predates this feature (or was built by one of the couple of code paths that
+// still hand over a flat style — PDF text sensing, project import) works unchanged: it's just a
+// single run wearing that flat style.
+function runsFromAnnotation(a) {
+  if (Array.isArray(a.runs) && a.runs.length) return a.runs;
+  return [{
+    text: a.text != null ? String(a.text) : '', color: a.color, fontSize: a.fontSize, fontFamily: a.fontFamily || 'helvetica',
+    bold: a.bold !== false, italic: !!a.italic, underline: !!a.underline,
+    superscript: !!a.superscript, subscript: !!a.subscript
+  }];
+}
+function textFromRuns(runs) { return runs.map((r) => r.text).join(''); }
+function sameRunStyle(x, y) { return RUN_STYLE_KEYS.every((k) => x[k] === y[k]); }
+// Drops empty runs and merges neighbours that ended up with identical style — typing inside a run,
+// or a style change with nothing selected, would otherwise leave the model needlessly fragmented.
+function normalizeRuns(runs) {
+  const out = [];
+  for (const r of runs) {
+    if (!r.text) continue;
+    const last = out[out.length - 1];
+    if (last && sameRunStyle(last, r)) last.text += r.text; else out.push({ ...r });
+  }
+  return out;
+}
+// Splits a run list on '\n' into printed lines, each line itself a list of runs — the shape every
+// layout routine below (canvas draw, pdf-lib export, bbox/hit-test measuring) walks.
+function runsToLines(runs) {
+  const lines = [[]];
+  for (const r of runs) {
+    const parts = r.text.split('\n');
+    parts.forEach((part, i) => {
+      if (i > 0) lines.push([]);
+      if (part) lines[lines.length - 1].push({ ...r, text: part });
+    });
+  }
+  return lines;
+}
+// Keeps a text annotation's legacy flat style fields matching its first run, for the handful of
+// places that just want "the" style of a box rather than its full run list.
+function syncFlatStyleFromRuns(a, runs) {
+  const r = runs[0] || { color: a.color || '#ef4444', fontSize: a.fontSize || 16, fontFamily: a.fontFamily || 'helvetica', bold: true, italic: false, underline: false, superscript: false, subscript: false };
+  a.color = r.color; a.fontSize = r.fontSize; a.fontFamily = r.fontFamily;
+  a.bold = r.bold; a.italic = r.italic; a.underline = r.underline;
+  a.superscript = r.superscript; a.subscript = r.subscript;
+}
+// Applies a style patch across an entire text annotation (every run at once) — used when a text box
+// is selected as a whole object rather than actively being edited, where "apply to the whole box"
+// is still the right behaviour (there's no specific text selected to narrow it to).
+function applyStyleToWholeTextAnnotation(a, patch) {
+  Object.assign(a, patch);
+  const runPatch = {};
+  RUN_STYLE_KEYS.forEach((k) => { if (k in patch) runPatch[k] = patch[k]; });
+  if (Object.keys(runPatch).length) {
+    a.runs = normalizeRuns(runsFromAnnotation(a).map((r) => ({ ...r, ...runPatch })));
+    a.text = textFromRuns(a.runs) || a.text;
+  }
+}
+// Aggregates a set of runs into one style object for the toolbar: a key everyone agrees on reports
+// that value; a key that differs across the runs reports `false` for on/off toggles (so the button
+// shows "off" rather than falsely claiming the whole selection shares it) or the first run's value
+// for anything else (color/size/family have no natural "off").
+function aggregateRunStyle(runs) {
+  const pick = (key, isBool) => {
+    if (!runs.length) return isBool ? false : undefined;
+    const first = runs[0][key];
+    return runs.every((r) => r[key] === first) ? first : (isBool ? false : first);
+  };
+  return {
+    color: pick('color', false), fontSize: pick('fontSize', false), fontFamily: pick('fontFamily', false),
+    bold: pick('bold', true), italic: pick('italic', true), underline: pick('underline', true),
+    superscript: pick('superscript', true), subscript: pick('subscript', true)
+  };
 }
 const HEX_RE = /^#[0-9a-f]{6}$/i;
 const ZOOM_LEVELS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4];
@@ -1252,6 +1355,20 @@ function normalizeBox(a) {
   const x1 = Math.min(a.x1, a.x2), x2 = Math.max(a.x1, a.x2), y1 = Math.min(a.y1, a.y2), y2 = Math.max(a.y1, a.y2);
   a.x1 = x1; a.y1 = y1; a.x2 = x2; a.y2 = y2;
 }
+function sanitizeRun(raw) {
+  if (!raw || typeof raw !== 'object' || typeof raw.text !== 'string' || !raw.text) return null;
+  return {
+    text: raw.text.slice(0, 2000),
+    color: HEX_RE.test(raw.color) ? raw.color : '#ef4444',
+    fontSize: numOr(raw.fontSize, 4, 300, 16),
+    fontFamily: FONT_FAMILIES.includes(raw.fontFamily) ? raw.fontFamily : 'helvetica',
+    bold: typeof raw.bold === 'boolean' ? raw.bold : true,
+    italic: !!raw.italic,
+    underline: !!raw.underline,
+    superscript: !!raw.superscript && !raw.subscript,
+    subscript: !!raw.subscript && !raw.superscript
+  };
+}
 function sanitizeAnnotation(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const id = typeof raw.id === 'string' && raw.id ? raw.id.slice(0, 64) : genId();
@@ -1294,6 +1411,10 @@ function sanitizeAnnotation(raw) {
         subscript: !!raw.subscript && !raw.superscript,
         align: TEXT_ALIGNS.includes(raw.align) ? raw.align : 'left'
       };
+      if (Array.isArray(raw.runs) && raw.runs.length) {
+        const runs = raw.runs.slice(0, 4000).map(sanitizeRun).filter((r) => r && r.text);
+        if (runs.length) { out.runs = runs; out.text = textFromRuns(runs).slice(0, 2000); syncFlatStyleFromRuns(out, runs); }
+      }
       const cr = raw.coverRect;
       if (cr && typeof cr === 'object' && [cr.x1, cr.y1, cr.x2, cr.y2].every(isNum)) {
         out.coverRect = { x1: cr.x1, y1: cr.y1, x2: cr.x2, y2: cr.y2 };
@@ -1521,28 +1642,30 @@ function drawAnnotation(ctx, a, s, pageNum) {
         ctx.fillRect(Math.min(r.x1, r.x2) * s, Math.min(r.y1, r.y2) * s, Math.abs(r.x2 - r.x1) * s, Math.abs(r.y2 - r.y1) * s);
         ctx.restore();
       }
-      ctx.fillStyle = a.color;
-      const renderSize = scriptFontSize(a);
-      const baseShift = scriptBaselineShift(a);
-      ctx.font = canvasFontString(a, renderSize * s);
       ctx.textBaseline = 'alphabetic';
       const m = measureTextLines(a);
       const align = a.align || 'left';
-      m.lines.forEach((ln, i) => {
-        if (!ln) return;
-        const dx = align === 'center' ? (m.maxW - m.widths[i]) / 2 : align === 'right' ? (m.maxW - m.widths[i]) : 0;
-        const lx = (a.x + dx) * s, ly = (a.y + baseShift + i * a.fontSize * LINE_H) * s;
-        ctx.fillText(ln, lx, ly);
-        if (a.underline) {
-          ctx.save();
-          ctx.strokeStyle = a.color;
-          ctx.lineWidth = Math.max(1, renderSize * s * 0.06);
-          ctx.beginPath();
-          const uy = ly + renderSize * s * 0.12;
-          ctx.moveTo(lx, uy); ctx.lineTo(lx + m.widths[i] * s, uy);
-          ctx.stroke();
-          ctx.restore();
-        }
+      m.lines.forEach((line) => {
+        if (!line.pieces.length) return;
+        const dx = align === 'center' ? (m.maxW - line.w) / 2 : align === 'right' ? (m.maxW - line.w) : 0;
+        line.pieces.forEach((p) => {
+          if (!p.text) return;
+          const renderSize = scriptFontSize(p);
+          ctx.font = canvasFontString(p, renderSize * s);
+          ctx.fillStyle = p.color;
+          const lx = (a.x + dx + p.x) * s, ly = (a.y + line.top + scriptBaselineShift(p)) * s;
+          ctx.fillText(p.text, lx, ly);
+          if (p.underline) {
+            ctx.save();
+            ctx.strokeStyle = p.color;
+            ctx.lineWidth = Math.max(1, renderSize * s * 0.06);
+            ctx.beginPath();
+            const uy = ly + renderSize * s * 0.12;
+            ctx.moveTo(lx, uy); ctx.lineTo(lx + p.w * s, uy);
+            ctx.stroke();
+            ctx.restore();
+          }
+        });
       });
       break;
     }
@@ -1559,16 +1682,36 @@ function drawAnnotation(ctx, a, s, pageNum) {
 // Measures every line at a fixed 100px reference size (cheap, cached font string) then scales
 // down to the annotation's real font size — one measurement pass covers width, alignment offsets
 // and the bounding box together.
+// Lays out a text annotation's runs in document-unit space (independent of on-screen zoom): each
+// line gets its pieces (with each piece's width and running x offset already resolved), the line's
+// own height (driven by its tallest run) and its cumulative top (== that line's baseline offset
+// from `a.y`, since drawing uses an alphabetic baseline). Measured at a fixed 100px reference font
+// per piece then scaled down — cheap, and keeps this independent of the live canvas's font state.
 function measureTextLines(a) {
-  measureCtx.font = canvasFontString(a, 100);
-  const lines = String(a.text).split('\n');
-  const fs = scriptFontSize(a);
-  const widths = lines.map((l) => measureCtx.measureText(l).width * fs / 100);
-  return { lines, widths, maxW: Math.max(0, ...widths) };
+  const lines = runsToLines(runsFromAnnotation(a));
+  let maxW = 0, top = 0;
+  const laid = lines.map((pieces) => {
+    let lineH = 0, x = 0;
+    const measured = pieces.map((p) => {
+      const fs = scriptFontSize(p);
+      measureCtx.font = canvasFontString(p, 100);
+      const w = p.text ? measureCtx.measureText(p.text).width * fs / 100 : 0;
+      lineH = Math.max(lineH, p.fontSize * LINE_H);
+      const piece = { ...p, x, w };
+      x += w;
+      return piece;
+    });
+    maxW = Math.max(maxW, x);
+    if (!lineH) lineH = (a.fontSize || 16) * LINE_H;
+    const line = { pieces: measured, w: x, top, h: lineH };
+    top += lineH;
+    return line;
+  });
+  return { lines: laid, maxW, totalH: top };
 }
 function textMetrics(a) {
   const m = measureTextLines(a);
-  return { w: m.maxW, lines: m.lines.length };
+  return { w: m.maxW, h: m.totalH, lineCount: m.lines.length };
 }
 function getAnnotationBBox(a) {
   switch (a.type) {
@@ -1594,9 +1737,18 @@ function getAnnotationBBox(a) {
       return { x1: Math.min(...xs) - pad, y1: Math.min(...ys) - pad, x2: Math.max(...xs) + pad, y2: Math.max(...ys) + pad };
     }
     case 'text': {
-      const m = textMetrics(a);
-      const fs = scriptFontSize(a), shift = scriptBaselineShift(a);
-      const bb = { x1: a.x - 2, y1: a.y + shift - fs, x2: a.x + m.w + 2, y2: a.y + shift + (m.lines - 1) * a.fontSize * LINE_H + fs * 0.28 };
+      const m = measureTextLines(a);
+      const first = m.lines[0], last = m.lines[m.lines.length - 1];
+      const ascTop = first && first.pieces.length
+        ? Math.min(...first.pieces.map((p) => scriptBaselineShift(p) - scriptFontSize(p)))
+        : -(a.fontSize || 16);
+      const descBottom = last && last.pieces.length
+        ? Math.max(...last.pieces.map((p) => scriptBaselineShift(p) + scriptFontSize(p) * 0.28))
+        : (a.fontSize || 16) * 0.28;
+      const bb = {
+        x1: a.x - 2, y1: a.y + (first ? first.top : 0) + ascTop,
+        x2: a.x + m.maxW + 2, y2: a.y + (last ? last.top : 0) + descBottom
+      };
       // A sensed-text edit's clickable/selectable area always includes the patch that hides the
       // original PDF text, even once the new text itself is shorter or shorter-lived than that patch.
       if (a.coverRect) {
@@ -2479,131 +2631,363 @@ function closeTextEditor(commit) { if (activeTextEditor) activeTextEditor.finish
 // PDF text alone (nothing is created), and committing a genuine edit both creates the annotation
 // *and* patches over the original glyphs with `coverRect`/`coverColor` so the old text doesn't
 // show through or behind the new.
+// The editor itself is a contenteditable box holding one <span> per run (each carrying its style
+// both as real CSS, for what you see, and as a `data-style` JSON blob, for reading it back). Typing
+// and deletion are left entirely to the browser; every keystroke re-derives `runs` from whatever's
+// actually in the DOM afterward and re-renders from that, restoring the caret by plain-text
+// character offset so the rebuild is invisible. A style change (bold, color, ...) reads the live
+// text *selection*: a real selection gets the patch applied to just that stretch of runs — split
+// out of whatever runs it crosses — so formatting specific strings, Google-Slides style, never
+// touches the rest of the box; a plain caret with nothing selected falls back to the whole box,
+// same as it always has, since there's no specific text to narrow the change to.
 function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
   closeTextEditor(true);
   const box = App.pageBoxes[pageNum];
   if (!box) return;
   const at = existing ? { x: existing.x, y: existing.y } : sensedBlock ? { x: sensedBlock.x, y: sensedBlock.y } : pdfPos;
-  // local, uncommitted style — every control (color, font, bold/italic/underline/superscript/subscript, align, size)
-  // previews live in the editor here and only lands on the real annotation when we commit below,
-  // exactly like the text content itself (Escape discards style changes too, not just typing).
-  const style = existing
+
+  // local, uncommitted model — content and every run's style preview live here and only land on
+  // the real annotation when we commit below, exactly like before (Escape discards it all).
+  // `align` stays one whole-box value, like paragraph alignment in any other editor.
+  const runSource = existing ? existing : sensedBlock
     ? {
-        color: existing.color, fontSize: existing.fontSize, fontFamily: existing.fontFamily || 'helvetica',
-        bold: existing.bold !== false, italic: !!existing.italic, underline: !!existing.underline,
-        superscript: !!existing.superscript, subscript: !!existing.subscript, align: existing.align || 'left'
-      }
-    : sensedBlock
-    ? {
-        // Text sensing doesn't attempt to detect superscript/subscript from the real PDF glyphs
-        // (same as underline above) — it always starts a sensed edit at normal baseline, and the
-        // toggle is there for the person to apply if the detected text actually needs it.
-        color: sensedBlock.color, fontSize: sensedBlock.fontSize, fontFamily: sensedBlock.fontFamily,
-        bold: !!sensedBlock.bold, italic: !!sensedBlock.italic, underline: false,
-        superscript: false, subscript: false, align: sensedBlock.align || 'left'
+        // Text sensing doesn't attempt to detect underline/superscript/subscript from the real PDF
+        // glyphs — it always starts a sensed edit at normal baseline, and the toggle is there for
+        // the person to apply if the detected text actually needs it.
+        text: sensedBlock.text, color: sensedBlock.color, fontSize: sensedBlock.fontSize, fontFamily: sensedBlock.fontFamily,
+        bold: !!sensedBlock.bold, italic: !!sensedBlock.italic, underline: false, superscript: false, subscript: false
       }
     : {
-        color: App.color, fontSize: App.fontSize, fontFamily: App.fontFamily, bold: App.bold, italic: App.italic,
-        underline: App.underline, superscript: App.superscript, subscript: App.subscript, align: App.align
+        text: '', color: App.color, fontSize: App.fontSize, fontFamily: App.fontFamily, bold: App.bold, italic: App.italic,
+        underline: App.underline, superscript: App.superscript, subscript: App.subscript
       };
-  const original = { ...style };
-  const originalText = existing ? existing.text : sensedBlock ? sensedBlock.text : '';
+  let runs = runsFromAnnotation(runSource).map((r) => ({ ...r }));
+  let align = existing ? (existing.align || 'left') : sensedBlock ? (sensedBlock.align || 'left') : App.align;
+  const originalRuns = runs.map((r) => ({ ...r }));
+  const originalAlign = align;
+  const originalText = textFromRuns(originalRuns);
 
-  const ta = document.createElement('textarea');
-  ta.className = 'text-editor';
-  ta.wrap = 'off'; ta.spellcheck = false; ta.rows = 1;
-  ta.setAttribute('aria-label', 'Text annotation');
-  ta.value = originalText;
+  const editorEl = document.createElement('div');
+  editorEl.className = 'text-editor';
+  editorEl.contentEditable = 'true';
+  editorEl.spellcheck = false;
+  editorEl.setAttribute('aria-label', 'Text annotation');
   // shift left by the thin dashed border + minimal padding, so typed text starts exactly at
   // the placed (or sensed) document x — see the "inline text editor" CSS for those numbers.
-  ta.style.left = `${at.x * App.scale - 3.5}px`;
+  editorEl.style.left = `${at.x * App.scale - 3.5}px`;
+  editorEl.style.lineHeight = String(LINE_H);
+
+  function renderEditorSpan(run) {
+    const span = document.createElement('span');
+    span.dataset.style = JSON.stringify({
+      color: run.color, fontSize: run.fontSize, fontFamily: run.fontFamily, bold: run.bold,
+      italic: run.italic, underline: run.underline, superscript: run.superscript, subscript: run.subscript
+    });
+    const px = Math.max(16, scriptFontSize(run) * App.scale);
+    span.style.fontFamily = textFontCss(run);
+    span.style.fontWeight = run.bold ? '700' : '400';
+    span.style.fontStyle = run.italic ? 'italic' : 'normal';
+    span.style.textDecoration = run.underline ? 'underline' : 'none';
+    span.style.color = run.color;
+    span.style.fontSize = `${px}px`;
+    span.style.verticalAlign = run.superscript ? 'super' : run.subscript ? 'sub' : 'baseline';
+    span.textContent = run.text;
+    return span;
+  }
+  function renderRuns() {
+    editorEl.innerHTML = '';
+    for (const r of runs) { if (r.text) editorEl.appendChild(renderEditorSpan(r)); }
+  }
+  // The style an unstyled bit of DOM (a bare text node the browser just inserted, say) should be
+  // read as — whatever the first run is currently carrying, or the app's new-text defaults if the
+  // box is entirely empty.
+  function currentDefaultStyle() {
+    const src = runs[0] || { color: App.color, fontSize: App.fontSize, fontFamily: App.fontFamily, bold: App.bold, italic: App.italic, underline: App.underline, superscript: App.superscript, subscript: App.subscript };
+    return { color: src.color, fontSize: src.fontSize, fontFamily: src.fontFamily, bold: src.bold, italic: src.italic, underline: src.underline, superscript: src.superscript, subscript: src.subscript };
+  }
+  function syncRunsFromDom() {
+    const collected = [];
+    const walk = (el) => {
+      for (const node of el.childNodes) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          if (node.textContent) collected.push({ text: node.textContent, ...currentDefaultStyle() });
+        } else if (node.nodeType === Node.ELEMENT_NODE) {
+          if (node.tagName === 'BR') {
+            collected.push({ text: '\n', ...currentDefaultStyle() });
+          } else if (node.dataset && node.dataset.style) {
+            let st; try { st = JSON.parse(node.dataset.style); } catch (e) { st = currentDefaultStyle(); }
+            if (node.textContent) collected.push({ text: node.textContent, ...st });
+          } else {
+            // an element we didn't create ourselves — most likely a browser-inserted paragraph
+            // wrapper despite the Enter/paste handling below. Recurse into it, and if it's a block
+            // element, treat it as starting a new line so its text isn't silently run together.
+            if (collected.length && getComputedStyle(node).display !== 'inline') collected.push({ text: '\n', ...currentDefaultStyle() });
+            walk(node);
+          }
+        }
+      }
+    };
+    walk(editorEl);
+    runs = normalizeRuns(collected.map((r) => ({ ...r, text: r.text.replace(/\u00A0/g, ' ') })));
+  }
+  // Character offset (into the plain concatenated text) of a DOM (node, offset) position.
+  function offsetOf(node, nodeOffset) {
+    if (node === editorEl) return Math.min(nodeOffset, textFromRuns(runs).length);
+    let total = 0, found = null;
+    const walk = (el) => {
+      for (const child of el.childNodes) {
+        if (found != null) return;
+        if (child === node) { found = total + nodeOffset; return; }
+        if (child.nodeType === Node.TEXT_NODE) total += child.textContent.length;
+        else if (child.nodeType === Node.ELEMENT_NODE) {
+          if (child.contains(node)) { walk(child); return; }
+          total += child.textContent.length;
+        }
+      }
+    };
+    walk(editorEl);
+    return found;
+  }
+  function getCaretOffset() {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return null;
+    const r = sel.getRangeAt(0);
+    if (!editorEl.contains(r.startContainer)) return null;
+    return offsetOf(r.startContainer, r.startOffset);
+  }
+  // A live text *selection* — not just a caret — inside the editor, as character offsets.
+  function getEditorSelectionOffsets() {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return null;
+    const range = sel.getRangeAt(0);
+    if (range.collapsed || !editorEl.contains(range.commonAncestorContainer)) return null;
+    const start = offsetOf(range.startContainer, range.startOffset);
+    const end = offsetOf(range.endContainer, range.endOffset);
+    if (start == null || end == null || start === end) return null;
+    return { start: Math.min(start, end), end: Math.max(start, end) };
+  }
+  function runsSliceInRange(list, start, end) {
+    let pos = 0; const out = [];
+    for (const r of list) {
+      const rEnd = pos + r.text.length;
+      if (rEnd > start && pos < end) out.push(r);
+      pos = rEnd;
+    }
+    return out;
+  }
+  // Splits whatever runs [start,end) crosses so that range is covered by whole runs, applies
+  // `patch` to just those, and hands back a fresh, normalized run list.
+  function applyPatchToRange(list, start, end, patch) {
+    const out = [];
+    let pos = 0;
+    for (const r of list) {
+      const rStart = pos, rEnd = pos + r.text.length;
+      pos = rEnd;
+      if (rEnd <= start || rStart >= end) { out.push(r); continue; }
+      const segs = [];
+      if (rStart < start) segs.push({ ...r, text: r.text.slice(0, start - rStart) });
+      const innerStart = Math.max(rStart, start) - rStart, innerEnd = Math.min(rEnd, end) - rStart;
+      segs.push({ ...r, ...patch, text: r.text.slice(innerStart, innerEnd) });
+      if (rEnd > end) segs.push({ ...r, text: r.text.slice(end - rStart) });
+      segs.forEach((s) => { if (s.text.length) out.push(s); });
+    }
+    return normalizeRuns(out);
+  }
+  function domPositionForOffset(offset) {
+    let pos = 0;
+    for (const span of editorEl.childNodes) {
+      const len = span.textContent.length;
+      if (offset <= pos + len) {
+        const node = span.firstChild;
+        return node ? { node, offset: offset - pos } : { node: span, offset: 0 };
+      }
+      pos += len;
+    }
+    const last = editorEl.lastChild;
+    if (last) { const node = last.firstChild; return node ? { node, offset: node.textContent.length } : { node: last, offset: 0 }; }
+    return { node: editorEl, offset: 0 };
+  }
+  function restoreSelection(start, end) {
+    try {
+      const a = domPositionForOffset(start), b = domPositionForOffset(end);
+      const range = document.createRange();
+      range.setStart(a.node, a.offset); range.setEnd(b.node, b.offset);
+      const sel = window.getSelection();
+      sel.removeAllRanges(); sel.addRange(range);
+    } catch (e) { /* not worth failing the edit over a caret we couldn't place back exactly */ }
+  }
+  // Re-renders from `runs` into fresh spans and puts the caret back where it logically was —
+  // called after every keystroke (so a bare, unstyled text node the browser just inserted always
+  // ends up wrapped in a properly styled span before the next edit) and after every style change.
+  function resyncAndRerender() {
+    const caret = getCaretOffset();
+    syncRunsFromDom();
+    renderRuns();
+    if (caret != null) restoreSelection(caret, caret);
+    fit();
+  }
 
   const fit = () => {
-    const fontPx = Math.max(16, scriptFontSize(style) * App.scale);
-    const shiftPx = scriptBaselineShift(style) * App.scale;
-    ta.style.fontFamily = textFontCss(style);
-    ta.style.fontWeight = style.bold ? '700' : '400';
-    ta.style.fontStyle = style.italic ? 'italic' : 'normal';
-    ta.style.textDecoration = style.underline ? 'underline' : 'none';
-    ta.style.textAlign = style.align;
-    ta.style.color = style.color;
-    ta.style.fontSize = `${fontPx}px`;
-    ta.style.lineHeight = String(LINE_H);
+    const lines = runsToLines(runs);
+    let maxW = 0;
+    lines.forEach((pieces) => {
+      let w = 0;
+      pieces.forEach((p) => {
+        measureCtx.font = canvasFontString(p, Math.max(16, scriptFontSize(p) * App.scale));
+        w += p.text ? measureCtx.measureText(p.text).width : 0;
+      });
+      maxW = Math.max(maxW, w);
+    });
+    const first = runs[0] || { fontSize: App.fontSize, superscript: false, subscript: false };
+    const fontPx = Math.max(16, scriptFontSize(first) * App.scale);
+    const shiftPx = scriptBaselineShift(first) * App.scale;
+    // These four mirror the first run onto the container itself, purely so an empty box (no spans
+    // yet) still shows the right font/color and a correctly sized caret before anything is typed.
+    editorEl.style.fontFamily = textFontCss(first);
+    editorEl.style.fontWeight = first.bold ? '700' : '400';
+    editorEl.style.fontStyle = first.italic ? 'italic' : 'normal';
+    editorEl.style.color = first.color || App.color;
+    editorEl.style.fontSize = `${fontPx}px`;
+    editorEl.style.textAlign = align;
     // align the editor's first baseline with where the annotation will be drawn (including the
-    // raised/dropped baseline while superscript/subscript is on)
-    ta.style.top = `${at.y * App.scale + shiftPx - 2.5 - 0.97 * fontPx}px`;
-    const lines = ta.value.split('\n');
-    measureCtx.font = canvasFontString(style, fontPx);
-    let w = 0;
-    for (const l of lines) w = Math.max(w, measureCtx.measureText(l).width);
-    ta.style.width = `${Math.max(40, w + 6)}px`;
-    ta.style.height = `${lines.length * fontPx * LINE_H + 6}px`;
+    // raised/dropped baseline while the first run's superscript/subscript is on)
+    editorEl.style.top = `${at.y * App.scale + shiftPx - 2.5 - 0.97 * fontPx}px`;
+    editorEl.style.width = `${Math.max(40, maxW + 6)}px`;
+    let totalH = 0;
+    lines.forEach((pieces) => {
+      let lh = fontPx * LINE_H;
+      pieces.forEach((p) => { lh = Math.max(lh, Math.max(16, scriptFontSize(p) * App.scale) * LINE_H); });
+      totalH += lh;
+    });
+    editorEl.style.height = `${totalH + 6}px`;
   };
-  fit();
-  box.appendChild(ta);
-  requestAnimationFrame(() => { ta.focus(); ta.select(); });
 
-  let done = false;
+  renderRuns();
+  fit();
+  box.appendChild(editorEl);
+  requestAnimationFrame(() => {
+    editorEl.focus();
+    const range = document.createRange();
+    range.selectNodeContents(editorEl);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  });
+
+  let done = false, composing = false;
   const api = {
-    getStyle() { return { ...style }; },
-    setStyle(patch) { Object.assign(style, patch); fit(); },
+    getStyle() {
+      syncRunsFromDom();
+      const selR = getEditorSelectionOffsets();
+      const source = selR ? runsSliceInRange(runs, selR.start, selR.end) : runs;
+      return { ...aggregateRunStyle(source.length ? source : [currentDefaultStyle()]), align };
+    },
+    setStyle(patch) {
+      if (Object.prototype.hasOwnProperty.call(patch, 'align')) { align = patch.align; fit(); return; }
+      syncRunsFromDom();
+      const selR = getEditorSelectionOffsets();
+      if (selR) {
+        runs = applyPatchToRange(runs, selR.start, selR.end, patch);
+        renderRuns();
+        restoreSelection(selR.start, selR.end);
+      } else {
+        const patched = runs.map((r) => ({ ...r, ...patch }));
+        const merged = normalizeRuns(patched);
+        // Nothing selected restyles the whole box, same as before — but if the box is entirely
+        // empty, normalizing would drop the (empty) placeholder run and the toggle would silently
+        // do nothing, so keep one empty run alive to carry the style forward to the first keystroke.
+        runs = merged.length ? merged : [{ text: '', ...currentDefaultStyle(), ...patch }];
+        renderRuns();
+        const total = textFromRuns(runs).length;
+        restoreSelection(total, total);
+      }
+      fit();
+    },
     finish(commit) {
       if (done) return;
       done = true; activeTextEditor = null;
-      const val = ta.value.replace(/\s+$/, '');
-      ta.remove();
+      syncRunsFromDom();
+      editorEl.remove();
       if (!commit) return;
-      const styleChanged = TEXT_STYLE_KEYS.some((k) => style[k] !== original[k]);
+      const normalized = normalizeRuns(runs);
+      const full = textFromRuns(normalized);
+      const val = full.replace(/\s+$/, '');   // trailing whitespace trimmed, same as before
+      let trimRemaining = full.length - val.length;
+      const finalRuns = normalized.map((r) => ({ ...r }));
+      for (let i = finalRuns.length - 1; i >= 0 && trimRemaining > 0; i--) {
+        const take = Math.min(trimRemaining, finalRuns[i].text.length);
+        finalRuns[i].text = finalRuns[i].text.slice(0, finalRuns[i].text.length - take);
+        trimRemaining -= take;
+      }
+      const runs2 = normalizeRuns(finalRuns);
+      const styleChanged = JSON.stringify(runs2) !== JSON.stringify(originalRuns) || align !== originalAlign;
       if (existing) {
         if (!val.trim()) {
           pushHistory(); removeAnnotationById(pageNum, existing.id);
           if (App.selected && App.selected.id === existing.id) App.selected = null;
         } else if (val !== existing.text || styleChanged) {
           pushHistory();
-          existing.text = val;
-          Object.assign(existing, style);
+          existing.text = val; existing.runs = runs2; existing.align = align;
+          syncFlatStyleFromRuns(existing, runs2);
         } else return;
       } else if (sensedBlock) {
         if (!val.trim() || (val === originalText && !styleChanged)) return;   // untouched — leave the real PDF text as-is
         pushHistory();
-        App.pageAnnotations[pageNum].push({
-          id: genId(), type: 'text', text: val, x: at.x, y: at.y, ...style,
+        const created = {
+          id: genId(), type: 'text', text: val, runs: runs2, align, x: at.x, y: at.y,
           coverRect: { ...sensedBlock.bbox }, coverColor: sensedBlock.bgColor || '#ffffff',
           // Text that came from an annotation (a Kami/Acrobat typed answer) sits *above* the page content,
           // so the whiteout patch alone can't hide it in the saved PDF — the export removes that very
           // annotation instead. This is the pdf.js id it is found by.
           ...(sensedBlock.annotId ? { replacesAnnotId: sensedBlock.annotId } : {})
-        });
+        };
+        syncFlatStyleFromRuns(created, runs2);
+        App.pageAnnotations[pageNum].push(created);
       } else {
         if (!val.trim()) return;
         pushHistory();
-        App.pageAnnotations[pageNum].push({ id: genId(), type: 'text', text: val, x: at.x, y: at.y, ...style });
+        const created = { id: genId(), type: 'text', text: val, runs: runs2, align, x: at.x, y: at.y };
+        syncFlatStyleFromRuns(created, runs2);
+        App.pageAnnotations[pageNum].push(created);
       }
       requestRedraw(pageNum);
       scheduleAutosave();
     }
   };
   activeTextEditor = api;
-  ta.addEventListener('input', fit);
-  ta.addEventListener('keydown', (e) => {
+  editorEl.addEventListener('compositionstart', () => { composing = true; });
+  editorEl.addEventListener('compositionend', () => { composing = false; resyncAndRerender(); });
+  editorEl.addEventListener('input', () => { if (!composing) resyncAndRerender(); });
+  editorEl.addEventListener('paste', (e) => {
+    e.preventDefault();
+    const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+    if (text) document.execCommand('insertText', false, text);
+    resyncAndRerender();
+  });
+  editorEl.addEventListener('keydown', (e) => {
     e.stopPropagation();
     const mod = e.ctrlKey || e.metaKey;
     if (mod && !e.shiftKey && !e.altKey) {
       const k = e.key.toLowerCase();
-      if (k === 'b') { e.preventDefault(); api.setStyle({ bold: !style.bold }); syncTextStyleButtons(); return; }
-      if (k === 'i') { e.preventDefault(); api.setStyle({ italic: !style.italic }); syncTextStyleButtons(); return; }
-      if (k === 'u') { e.preventDefault(); api.setStyle({ underline: !style.underline }); syncTextStyleButtons(); return; }
+      if (k === 'b') { e.preventDefault(); api.setStyle({ bold: !api.getStyle().bold }); syncTextStyleButtons(); return; }
+      if (k === 'i') { e.preventDefault(); api.setStyle({ italic: !api.getStyle().italic }); syncTextStyleButtons(); return; }
+      if (k === 'u') { e.preventDefault(); api.setStyle({ underline: !api.getStyle().underline }); syncTextStyleButtons(); return; }
       // Ctrl+= toggles subscript, matching the shortcut most word processors use
-      if (e.key === '=') { e.preventDefault(); api.setStyle({ subscript: !style.subscript, superscript: false }); syncTextStyleButtons(); return; }
+      if (e.key === '=') { e.preventDefault(); api.setStyle({ subscript: !api.getStyle().subscript, superscript: false }); syncTextStyleButtons(); return; }
     }
     // Ctrl+Shift+= (Ctrl+Shift+Plus) toggles superscript, same convention
     if (mod && e.shiftKey && !e.altKey && (e.key === '+' || e.key === '=')) {
-      e.preventDefault(); api.setStyle({ superscript: !style.superscript, subscript: false }); syncTextStyleButtons(); return;
+      e.preventDefault(); api.setStyle({ superscript: !api.getStyle().superscript, subscript: false }); syncTextStyleButtons(); return;
     }
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); api.finish(true); }
-    else if (e.key === 'Escape') { e.preventDefault(); api.finish(false); }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (e.shiftKey) { document.execCommand('insertText', false, '\n'); resyncAndRerender(); }
+      else api.finish(true);
+      return;
+    }
+    if (e.key === 'Escape') { e.preventDefault(); api.finish(false); }
   });
-  ta.addEventListener('blur', () => api.finish(true));
+  editorEl.addEventListener('blur', () => api.finish(true));
   refreshControls();
 }
 
@@ -3412,7 +3796,7 @@ function applyTextStyle(patch) {
   const sel = getSelectedAnnotation();
   if (sel && sel.type === 'text') {
     beginStyleEdit();
-    Object.assign(sel, patch);
+    applyStyleToWholeTextAnnotation(sel, patch);
     requestRedraw(App.selected.pageNum);
     scheduleAutosave();
   } else {
@@ -3480,7 +3864,7 @@ function setColor(hex) {
   const sel = getSelectedAnnotation();
   if (sel && sel.type !== 'image') {
     beginStyleEdit();
-    sel.color = hex;
+    if (sel.type === 'text') applyStyleToWholeTextAnnotation(sel, { color: hex }); else sel.color = hex;
     requestRedraw(App.selected.pageNum);
     scheduleAutosave();
   }
@@ -4177,7 +4561,7 @@ sizeSlider.addEventListener('input', (e) => {
   const sel = getSelectedAnnotation();
   if (sel && sel.type !== 'image') {
     beginStyleEdit();
-    if (sel.type === 'text') sel.fontSize = v; else sel.width = v;
+    if (sel.type === 'text') applyStyleToWholeTextAnnotation(sel, { fontSize: v }); else sel.width = v;
     requestRedraw(App.selected.pageNum); scheduleAutosave();
     return;
   }
