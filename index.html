@@ -5168,6 +5168,7 @@ window.addEventListener('keydown', (e) => {
     if (!helpModal.classList.contains('hidden')) { closeHelpModal(); return; }
     if (!annotContextMenu.classList.contains('hidden')) { closeContextMenu(); return; }
     closeExportMenu();
+    closeThemeMenu();
     closeShapesMenu();
     if (App.gesture && App.gesture.kind === 'draw') { const pn = App.gesture.pageNum; App.gesture = null; requestRedraw(pn); }
     if (App.selected) setSelected(null);
@@ -5406,6 +5407,7 @@ window.addEventListener('resize', debounce(() => { applySidebarState(); applyThu
 
 btnExportToggle.addEventListener('click', (e) => {
   e.stopPropagation();
+  closeThemeMenu();
   const open = exportMenu.classList.toggle('hidden') === false;
   btnExportToggle.setAttribute('aria-expanded', String(open));
 });
@@ -5478,10 +5480,165 @@ $('btnCloseHelp').addEventListener('click', closeHelpModal);
 helpModal.addEventListener('click', (e) => { if (e.target === helpModal) closeHelpModal(); });
 
 // =======================================================================
+// SETTINGS + THEMES
+// One JSON blob in localStorage ('acromark:settings:v1'). The <head> bootstrap script reads the
+// same key's `theme` field to paint the right palette before first render, so keep the key and
+// field name in sync with it. Every storage touch is guarded — persistence is a nicety only.
+// =======================================================================
+const SETTINGS_KEY = 'acromark:settings:v1';
+// `bg` / `accent` are RGB triplets copied from each palette's --canvas / --accent, used only to
+// paint the preview dot in the picker (the real palettes live in the CSS at the top of the file).
+const THEMES = [
+  { id: 'gold',       label: 'Classic Gold',        dark: false, bg: '246 243 236', accent: '148 92 24' },
+  { id: 'black-gold', label: 'Black & Gold',        dark: true,  bg: '18 19 22',    accent: '224 172 92' },
+  { id: 'blue-gold',  label: 'Midnight Blue & Gold', dark: true, bg: '13 18 30',    accent: '212 175 55' },
+  { id: 'emerald',    label: 'Emerald',             dark: true,  bg: '10 18 15',    accent: '52 211 153' },
+  { id: 'teal',       label: 'Teal',                dark: true,  bg: '9 20 22',     accent: '45 212 191' },
+  { id: 'violet',     label: 'Violet',              dark: true,  bg: '18 14 24',    accent: '167 139 250' },
+  { id: 'crimson',    label: 'Crimson',             dark: true,  bg: '20 18 18',    accent: '213 64 88' },
+  { id: 'silver',     label: 'Silver',              dark: true,  bg: '16 16 17',    accent: '184 190 199' },
+  { id: 'rose',       label: 'Rose',                dark: false, bg: '250 240 240', accent: '184 92 107' },
+  { id: 'sage',       label: 'Sage',                dark: false, bg: '241 244 236', accent: '75 122 74' }
+];
+const THEME_IDS = THEMES.map((t) => t.id);
+App.theme = document.documentElement.getAttribute('data-theme');
+if (!THEME_IDS.includes(App.theme)) App.theme = 'gold';
+
+function loadSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null');
+    return s && typeof s === 'object' ? s : {};
+  } catch (err) { return {}; }
+}
+function saveSettingsNow() {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      theme: App.theme,
+      color: App.color, strokeWidth: App.strokeWidth,
+      highlighterWidth: App.highlighterWidth, highlighterOpacity: App.highlighterOpacity,
+      fontSize: App.fontSize,
+      sidebarOpen: App.sidebarOpen, thumbsOpen: App.thumbsOpen
+    }));
+  } catch (err) { /* storage full or blocked — settings just won't persist this session */ }
+}
+const scheduleSettingsSave = debounce(saveSettingsNow, 300);
+// Copies saved values onto App, ignoring anything missing or malformed (a hand-edited or
+// older blob must never be able to break startup).
+function applySavedSettings(s) {
+  const num = (v, lo, hi) => (typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi);
+  if (typeof s.color === 'string' && HEX_RE.test(s.color)) App.color = s.color;
+  if (num(s.strokeWidth, 1, 25)) App.strokeWidth = s.strokeWidth;
+  if (num(s.highlighterWidth, 6, 40)) App.highlighterWidth = s.highlighterWidth;
+  if (num(s.highlighterOpacity, 0.05, 1)) App.highlighterOpacity = s.highlighterOpacity;
+  if (num(s.fontSize, 8, 72)) App.fontSize = s.fontSize;
+  if (typeof s.sidebarOpen === 'boolean') App.sidebarOpen = s.sidebarOpen;
+  if (typeof s.thumbsOpen === 'boolean') App.thumbsOpen = s.thumbsOpen;
+}
+
+// ---- theme application ----
+function getTheme(id) { return THEMES.find((t) => t.id === id) || THEMES[0]; }
+function syncThemeMenu() {
+  themeMenuList.querySelectorAll('.theme-swatch').forEach((b) => {
+    const on = b.dataset.theme === App.theme;
+    b.setAttribute('aria-checked', String(on));
+    b.tabIndex = on ? 0 : -1;
+  });
+}
+function applyTheme(id, { save = true } = {}) {
+  const theme = getTheme(id);
+  App.theme = theme.id;
+  document.documentElement.setAttribute('data-theme', theme.id);
+  // Mobile browser chrome should match the app bar rather than the previous palette.
+  let meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta) { meta = document.createElement('meta'); meta.name = 'theme-color'; document.head.appendChild(meta); }
+  meta.content = themeRGB('surface');
+  syncThemeMenu();
+  // Canvas-drawn UI (selection handles, comment pins, etc.) reads tokens through themeRGB(),
+  // which CSS can't repaint for us — so redraw every page that currently has an overlay canvas.
+  Object.keys(App.annotCanvases).forEach((n) => requestRedraw(+n));
+  if (save) scheduleSettingsSave();
+}
+
+// ---- theme picker menu ----
+const themeMenu = $('themeMenu');
+const themeMenuList = $('themeMenuList');
+const btnThemeMenuToggle = $('btnThemeMenuToggle');
+function buildThemeMenu() {
+  themeMenuList.innerHTML = '';
+  THEMES.forEach((t) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'theme-swatch';
+    b.dataset.theme = t.id;
+    b.setAttribute('role', 'menuitemradio');
+    b.setAttribute('aria-checked', 'false');
+    const dot = document.createElement('span');
+    dot.className = 'swatch-dot';
+    dot.style.background = `linear-gradient(135deg, rgb(${t.bg}) 50%, rgb(${t.accent}) 50%)`;
+    const name = document.createElement('span');
+    name.className = 'text-sm text-fg';
+    name.textContent = t.label;
+    const kind = document.createElement('span');
+    kind.className = 'text-[10px] text-faint';
+    kind.textContent = t.dark ? 'Dark' : 'Light';
+    const check = document.createElement('i');
+    check.setAttribute('data-lucide', 'check');
+    check.className = 'theme-check w-4 h-4 text-accent';
+    b.append(dot, name, kind, check);
+    themeMenuList.appendChild(b);
+  });
+  renderIcons();
+  syncThemeMenu();
+}
+function closeThemeMenu(returnFocus = false) {
+  if (themeMenu.classList.contains('hidden')) return;
+  themeMenu.classList.add('hidden');
+  btnThemeMenuToggle.setAttribute('aria-expanded', 'false');
+  if (returnFocus) btnThemeMenuToggle.focus();
+}
+function openThemeMenu() {
+  closeExportMenu();
+  themeMenu.classList.remove('hidden');
+  btnThemeMenuToggle.setAttribute('aria-expanded', 'true');
+  const cur = themeMenuList.querySelector('.theme-swatch[aria-checked="true"]');
+  if (cur) { cur.focus(); cur.scrollIntoView({ block: 'nearest' }); }
+}
+btnThemeMenuToggle.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (themeMenu.classList.contains('hidden')) openThemeMenu(); else closeThemeMenu();
+});
+themeMenu.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const b = e.target.closest('.theme-swatch');
+  if (b) applyTheme(b.dataset.theme);
+});
+themeMenu.addEventListener('keydown', (e) => {
+  const items = [...themeMenuList.querySelectorAll('.theme-swatch')];
+  const i = items.indexOf(document.activeElement);
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const next = e.key === 'ArrowDown' ? (i + 1) % items.length : (i - 1 + items.length) % items.length;
+    items[next].focus();
+  } else if (e.key === 'Home') { e.preventDefault(); items[0].focus(); }
+  else if (e.key === 'End') { e.preventDefault(); items[items.length - 1].focus(); }
+  else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeThemeMenu(true); }
+});
+document.addEventListener('click', () => closeThemeMenu());
+// If another tab changes the theme, follow it (a saved theme is a per-device preference).
+window.addEventListener('storage', (e) => {
+  if (e.key !== SETTINGS_KEY) return;
+  const t = loadSettings().theme;
+  if (THEME_IDS.includes(t) && t !== App.theme) applyTheme(t, { save: false });
+});
+
+// =======================================================================
 // BOOT
 // =======================================================================
+applySavedSettings(loadSettings());
+buildThemeMenu();
+applyTheme(App.theme, { save: false });
 renderIcons();
-App.sidebarOpen = window.innerWidth >= 768;
+if (loadSettings().sidebarOpen === undefined) App.sidebarOpen = window.innerWidth >= 768;
 applySidebarState();
 applyThumbsState();
 updateHistoryButtons();
