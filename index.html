@@ -923,14 +923,21 @@ async function buildAnnotatedPdf(opts) {
             break;
           }
           case 'text': {
-            if (a.coverRect) {   // patch over the original PDF text before the replacement is drawn
-              const cc = HEX_RE.test(a.coverColor) ? color01(a.coverColor) : rgb(1, 1, 1);
+            if (a.coverRect) {   // erase the original PDF text before the replacement is drawn
               const { x1, y1, x2, y2 } = a.coverRect;
-              const cr1 = P(x1, y1), cr2 = P(x2, y1), cr3 = P(x2, y2), cr4 = P(x1, y2);
-              page.drawSvgPath(
-                `M ${f(cr1.x)} ${f(-cr1.y)} L ${f(cr2.x)} ${f(-cr2.y)} L ${f(cr3.x)} ${f(-cr3.y)} L ${f(cr4.x)} ${f(-cr4.y)} Z`,
-                { x: 0, y: 0, color: cc }
-              );
+              if (a.eraseImage) {
+                try {
+                  const patch = await doc.embedPng(bytesFromDataUrl(a.eraseImage));
+                  placeImage(patch, Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2));
+                } catch (err) { /* couldn't embed the patch — leave the original glyphs rather than guess a fill colour */ }
+              } else if (a.coverColor) {   // legacy project files saved before real erasure existed
+                const cc = HEX_RE.test(a.coverColor) ? color01(a.coverColor) : rgb(1, 1, 1);
+                const cr1 = P(x1, y1), cr2 = P(x2, y1), cr3 = P(x2, y2), cr4 = P(x1, y2);
+                page.drawSvgPath(
+                  `M ${f(cr1.x)} ${f(-cr1.y)} L ${f(cr2.x)} ${f(-cr2.y)} L ${f(cr3.x)} ${f(-cr3.y)} L ${f(cr4.x)} ${f(-cr4.y)} Z`,
+                  { x: 0, y: 0, color: cc }
+                );
+              }
             }
             const lines = runsToLines(runsFromAnnotation(a));
             let encodable = true;
@@ -1183,6 +1190,7 @@ const App = {
 
   history: [], future: [],
   imageCache: {},
+  eraseImageCache: {},                 // annotation id -> decoded <img> for a.eraseImage (see buildEraseImage)
   busy: false,
   sampling: false                      // true while the page-pixel eyedropper is armed
 };
@@ -1454,7 +1462,12 @@ function sanitizeAnnotation(raw) {
       const cr = raw.coverRect;
       if (cr && typeof cr === 'object' && [cr.x1, cr.y1, cr.x2, cr.y2].every(isNum)) {
         out.coverRect = { x1: cr.x1, y1: cr.y1, x2: cr.x2, y2: cr.y2 };
-        out.coverColor = HEX_RE.test(raw.coverColor) ? raw.coverColor : '#ffffff';
+        if (typeof raw.eraseImage === 'string' && raw.eraseImage.length <= 6e6 &&
+            /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(raw.eraseImage)) {
+          out.eraseImage = raw.eraseImage;
+        } else if (HEX_RE.test(raw.coverColor)) {
+          out.coverColor = raw.coverColor;   // legacy project file — flat-colour fallback only, never defaulted
+        }
       }
       if (typeof raw.replacesAnnotId === 'string' && /^\d{1,9}R\d{0,5}$/.test(raw.replacesAnnotId)) out.replacesAnnotId = raw.replacesAnnotId;
       return out;
@@ -1593,6 +1606,18 @@ function getCachedImage(a, pageNum) {
   App.imageCache[a.id] = img;
   return img;
 }
+// Same idea as getCachedImage, for a sensed-text edit's erase patch (a.eraseImage — see
+// buildEraseImage). Decoding is async, so the very first draw after an edit lands may find
+// nothing to show yet; the onload redraw picks it up a frame later. An annotation's eraseImage is
+// set once, at commit time, and never changes afterward, so caching forever by id is safe.
+function getCachedEraseImage(a, pageNum) {
+  if (App.eraseImageCache[a.id]) return App.eraseImageCache[a.id];
+  const img = new Image();
+  img.onload = () => { if (pageNum) requestRedraw(pageNum); };
+  img.src = a.eraseImage;
+  App.eraseImageCache[a.id] = img;
+  return img;
+}
 
 function tracePen(ctx, pts, s) {
   ctx.beginPath();
@@ -1671,12 +1696,26 @@ function drawAnnotation(ctx, a, s, pageNum) {
       break;
     }
     case 'text': {
-      if (a.coverRect) {   // patches over the original PDF text a sensed edit replaces
-        ctx.save();
-        ctx.fillStyle = HEX_RE.test(a.coverColor) ? a.coverColor : '#ffffff';
+      if (a.coverRect) {   // erases the original PDF text a sensed edit replaces
         const r = a.coverRect;
-        ctx.fillRect(Math.min(r.x1, r.x2) * s, Math.min(r.y1, r.y2) * s, Math.abs(r.x2 - r.x1) * s, Math.abs(r.y2 - r.y1) * s);
-        ctx.restore();
+        const rx = Math.min(r.x1, r.x2) * s, ry = Math.min(r.y1, r.y2) * s;
+        const rw = Math.abs(r.x2 - r.x1) * s, rh = Math.abs(r.y2 - r.y1) * s;
+        if (a.eraseImage) {
+          // The real patch: original page pixels with just the glyph ink painted over using
+          // colour borrowed from the background around them — see buildEraseImage. If it hasn't
+          // finished decoding yet, draw nothing this frame rather than a wrong-coloured guess;
+          // the image's onload triggers a redraw the moment it's ready.
+          const img = getCachedEraseImage(a, pageNum);
+          if (img.complete && img.naturalWidth) ctx.drawImage(img, rx, ry, rw, rh);
+        } else if (a.coverColor) {
+          // Only reached for an older project file saved before real erasure existed, or the rare
+          // case the page pixels couldn't be sampled — a flat fill is better than nothing here,
+          // but it's a fallback, never the default.
+          ctx.save();
+          ctx.fillStyle = HEX_RE.test(a.coverColor) ? a.coverColor : '#ffffff';
+          ctx.fillRect(rx, ry, rw, rh);
+          ctx.restore();
+        }
       }
       // The live DOM editor (see openTextEditor) is the only thing that should show this
       // annotation's text while it's actively being typed into — drawing it here too would
@@ -1928,7 +1967,7 @@ function applyTranslatedGeometry(a, orig, dx, dy) {
       a.cx = orig.cx + dx; a.cy = orig.cy + dy; break;
     case 'text': case 'image':
       a.x = orig.x + dx; a.y = orig.y + dy;
-      if (a.type === 'text' && orig.coverRect) {   // keep the whiteout patch glued to the text it covers
+      if (a.type === 'text' && orig.coverRect) {   // keep the erase patch glued to the text it covers
         a.coverRect = { x1: orig.coverRect.x1 + dx, y1: orig.coverRect.y1 + dy, x2: orig.coverRect.x2 + dx, y2: orig.coverRect.y2 + dy };
       }
       break;
@@ -1958,7 +1997,7 @@ function duplicateSelectedAnnotation() {
       copy.x += off; copy.y += off;
       // A duplicate is a new, independent piece of text — it shouldn't drag along the original's
       // "this patches over real PDF text" whiteout, or it'd leave that patch behind, unmoved.
-      if (copy.type === 'text') { delete copy.coverRect; delete copy.coverColor; delete copy.replacesAnnotId; }
+      if (copy.type === 'text') { delete copy.coverRect; delete copy.coverColor; delete copy.eraseImage; delete copy.replacesAnnotId; }
       break;
     case 'curve':
       copy.x1 += off; copy.y1 += off; copy.x2 += off; copy.y2 += off; copy.cx += off; copy.cy += off; break;
@@ -2679,8 +2718,8 @@ function closeTextEditor(commit) { if (activeTextEditor) activeTextEditor.finish
 // PDF text: there's no annotation for it yet, only a guess at what it says and how it's styled.
 // Editing one is like editing `existing`, except committing an unchanged block leaves the real
 // PDF text alone (nothing is created), and committing a genuine edit both creates the annotation
-// *and* patches over the original glyphs with `coverRect`/`coverColor` so the old text doesn't
-// show through or behind the new.
+// *and* erases the original glyphs for real (`coverRect`/`eraseImage` — see buildEraseImage) so
+// the old text doesn't show through or behind the new.
 // The editor itself is a contenteditable box holding one <span> per run (each carrying its style
 // both as real CSS, for what you see, and as a `data-style` JSON blob, for reading it back). Typing
 // and deletion are left entirely to the browser; every keystroke re-derives `runs` from whatever's
@@ -2745,7 +2784,7 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
       color: run.color, fontSize: run.fontSize, fontFamily: run.fontFamily, bold: run.bold,
       italic: run.italic, underline: run.underline, superscript: run.superscript, subscript: run.subscript
     });
-    const px = Math.max(16, scriptFontSize(run) * App.scale);
+    const px = scriptFontSize(run) * App.scale;
     span.style.fontFamily = textFontCss(run);
     span.style.fontWeight = run.bold ? '700' : '400';
     span.style.fontStyle = run.italic ? 'italic' : 'normal';
@@ -2964,13 +3003,13 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
     lines.forEach((pieces) => {
       let w = 0;
       pieces.forEach((p) => {
-        measureCtx.font = canvasFontString(p, Math.max(16, scriptFontSize(p) * App.scale));
+        measureCtx.font = canvasFontString(p, scriptFontSize(p) * App.scale);
         w += p.text ? measureCtx.measureText(p.text).width : 0;
       });
       maxW = Math.max(maxW, w);
     });
     const first = runs[0] || { fontSize: App.fontSize, superscript: false, subscript: false };
-    const fontPx = Math.max(16, scriptFontSize(first) * App.scale);
+    const fontPx = scriptFontSize(first) * App.scale;
     const shiftPx = scriptBaselineShift(first) * App.scale;
     // These four mirror the first run onto the container itself, purely so an empty box (no spans
     // yet) still shows the right font/color and a correctly sized caret before anything is typed.
@@ -2988,29 +3027,36 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
     let totalH = 0;
     lines.forEach((pieces) => {
       let lh = fontPx * lineHeight;
-      pieces.forEach((p) => { lh = Math.max(lh, Math.max(16, scriptFontSize(p) * App.scale) * lineHeight); });
+      pieces.forEach((p) => { lh = Math.max(lh, scriptFontSize(p) * App.scale * lineHeight); });
       totalH += lh;
     });
     editorEl.style.height = `${totalH + 6}px`;
   };
 
   // A sensed block is real PDF page content, not an annotation — there's nothing in
-  // App.pageAnnotations to hide the way editingAnnotation hides an existing text box above. Patch
-  // over it with a plain div the moment editing starts (matching the same bbox/colour the
-  // permanent coverRect will use on commit) so the original glyphs don't peek out from behind the
-  // transparent, live-sized editor while you type.
-  let coverEl = null;
+  // App.pageAnnotations to hide the way editingAnnotation hides an existing text box above. Erase
+  // it for real the moment editing starts (see buildEraseImage — this is the exact same patch
+  // `finish()` below commits to the permanent annotation, computed once and reused) so the
+  // original glyphs don't peek out from behind the transparent, live-sized editor while you type,
+  // and so nothing changes visually the instant you commit.
+  let coverEl = null, sensedErase = null;
   if (sensedBlock) {
+    sensedErase = buildEraseImage(pageNum, sensedBlock.bbox);
     coverEl = document.createElement('div');
     coverEl.style.position = 'absolute';
     coverEl.style.zIndex = '29';
     coverEl.style.pointerEvents = 'none';
-    coverEl.style.background = HEX_RE.test(sensedBlock.bgColor) ? sensedBlock.bgColor : '#ffffff';
-    const bb = sensedBlock.bbox;
+    const bb = sensedErase || sensedBlock.bbox;
     coverEl.style.left = `${bb.x1 * App.scale}px`;
     coverEl.style.top = `${bb.y1 * App.scale}px`;
     coverEl.style.width = `${Math.max(0, (bb.x2 - bb.x1) * App.scale)}px`;
     coverEl.style.height = `${Math.max(0, (bb.y2 - bb.y1) * App.scale)}px`;
+    if (sensedErase) {
+      coverEl.style.backgroundImage = `url(${sensedErase.dataUrl})`;
+      coverEl.style.backgroundSize = '100% 100%';
+    }
+    // If the page pixels couldn't be sampled, leave coverEl fully transparent — better to let the
+    // real glyphs show through for a moment than to guess at a fill colour that might be wrong.
     box.appendChild(coverEl);
   }
 
@@ -3122,9 +3168,12 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
         pushHistory();
         const created = {
           id: genId(), type: 'text', text: val, runs: runs2, align, lineHeight, x: at.x, y: at.y,
-          coverRect: { ...sensedBlock.bbox }, coverColor: sensedBlock.bgColor || '#ffffff',
+          coverRect: sensedErase
+            ? { x1: sensedErase.x1, y1: sensedErase.y1, x2: sensedErase.x2, y2: sensedErase.y2 }
+            : { ...sensedBlock.bbox },
+          ...(sensedErase ? { eraseImage: sensedErase.dataUrl } : {}),
           // Text that came from an annotation (a Kami/Acrobat typed answer) sits *above* the page content,
-          // so the whiteout patch alone can't hide it in the saved PDF — the export removes that very
+          // so the erase patch alone can't hide it in the saved PDF — the export removes that very
           // annotation instead. This is the pdf.js id it is found by.
           ...(sensedBlock.annotId ? { replacesAnnotId: sensedBlock.annotId } : {})
         };
@@ -3325,6 +3374,124 @@ function sampleRegionColors(pageNum, bboxDoc) {
     if (Math.hypot(c[0] - bgRgb[0], c[1] - bgRgb[1], c[2] - bgRgb[2]) > 45) { inkHex = toHex(key); break; }
   }
   return { bg: bgHex, ink: inkHex };
+}
+// Real removal of the original PDF text a sensed edit replaces — not a "fake" flat-colour box
+// pasted over it. Samples the already-rendered page pixels under `bboxDoc`, works out which of
+// them are the glyph ink itself (closer to the block's ink colour than its background — a small
+// bias also catches the half-antialiased pixels right at a stroke's edge, so no thin ghost outline
+// of the old letters survives), and repaints *only* those pixels, spreading colour in from the
+// untouched background pixels around them. Everything that wasn't ink — a gradient, a watermark, a
+// shaded table cell, whatever was actually there — comes through completely unchanged, because it
+// was never touched in the first place. Returns { dataUrl, x1, y1, x2, y2 } (x1..y2 in document
+// units, the exact rect the returned image covers) or null if the page isn't currently rendered or
+// no ink was found to erase — callers fall back to leaving the original glyphs alone rather than
+// guessing a fill colour.
+function buildEraseImage(pageNum, bboxDoc) {
+  const st = App.pageState[pageNum];
+  const canvas = st && st.pdfCanvas;
+  if (!canvas) return null;
+  const ac = App.annotCanvases[pageNum];
+  const out = (ac && ac._out) || outputScaleFor(pageCssSize(pageNum).w, pageCssSize(pageNum).h);
+  const s = App.scale * out;
+  const pad = 2;   // a pixel or two of margin so edge antialiasing is sampled (and erasable) too
+  const x1 = Math.max(0, Math.floor(bboxDoc.x1 * s) - pad), y1 = Math.max(0, Math.floor(bboxDoc.y1 * s) - pad);
+  const x2 = Math.min(canvas.width, Math.ceil(bboxDoc.x2 * s) + pad), y2 = Math.min(canvas.height, Math.ceil(bboxDoc.y2 * s) + pad);
+  const w = x2 - x1, h = y2 - y1;
+  if (w <= 0 || h <= 0) return null;
+  let src;
+  try { src = canvas.getContext('2d').getImageData(x1, y1, w, h); } catch (err) { return null; }
+  const data = src.data;
+  const n = w * h;
+
+  // Pass 1 — the same coarse colour vote sampleRegionColors uses, just to find a starting ink /
+  // background reference colour for classifying individual pixels below.
+  const counts = new Map();
+  const stride = Math.max(1, Math.floor(n / 8000));
+  for (let i = 0; i < n; i += stride) {
+    const p = i * 4;
+    if (data[p + 3] < 200) continue;
+    const key = (data[p] >> 3) + ',' + (data[p + 1] >> 3) + ',' + (data[p + 2] >> 3);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  if (!counts.size) return null;
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  const rgbOf = (key) => key.split(',').map((v) => (+v) << 3);
+  const bgRgb = rgbOf(sorted[0][0]);
+  let inkRgb = null;
+  for (const [key] of sorted) {
+    const c = rgbOf(key);
+    if (Math.hypot(c[0] - bgRgb[0], c[1] - bgRgb[1], c[2] - bgRgb[2]) > 45) { inkRgb = c; break; }
+  }
+  if (!inkRgb) return null;   // nothing ink-coloured in this region — no glyphs to erase
+
+  // Pass 2 — classify every pixel: closer to the ink reference than to the background one becomes
+  // part of the mask to be erased. The 1.15 bias leans toward calling a borderline (antialiased)
+  // pixel ink rather than background, so stroke edges get cleaned up too, not just their centres.
+  const mask = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const p = i * 4;
+    const dInk = Math.hypot(data[p] - inkRgb[0], data[p + 1] - inkRgb[1], data[p + 2] - inkRgb[2]);
+    const dBg = Math.hypot(data[p] - bgRgb[0], data[p + 1] - bgRgb[1], data[p + 2] - bgRgb[2]);
+    if (dInk < dBg * 1.15) mask[i] = 1;
+  }
+  // Grow the mask by one ring so a faint sliver of antialiasing right at a stroke's edge doesn't
+  // survive as a thin ghost outline of the old letterforms.
+  const grown = mask.slice();
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (mask[i]) continue;
+      outer:
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          if (mask[ny * w + nx]) { grown[i] = 1; break outer; }
+        }
+      }
+    }
+  }
+
+  // Pass 3 — inpaint: repeatedly repaint every still-masked pixel with the average of whichever of
+  // its 8 neighbours are already resolved, so colour spreads inward from the real, untouched pixels
+  // around the glyphs rather than from one flat guess. A capped number of passes is plenty for any
+  // realistic stroke width (even a large bold heading) and keeps a pathological case bounded.
+  const resolved = new Uint8Array(n);
+  for (let i = 0; i < n; i++) resolved[i] = grown[i] ? 0 : 1;
+  for (let pass = 0; pass < 60; pass++) {
+    let remaining = 0, changed = false;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (resolved[i]) continue;
+        let rs = 0, gs = 0, bs = 0, cnt = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (!dx && !dy) continue;
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+            const ni = ny * w + nx;
+            if (!resolved[ni]) continue;
+            const p = ni * 4;
+            rs += data[p]; gs += data[p + 1]; bs += data[p + 2]; cnt++;
+          }
+        }
+        if (cnt) {
+          const p = i * 4;
+          data[p] = Math.round(rs / cnt); data[p + 1] = Math.round(gs / cnt); data[p + 2] = Math.round(bs / cnt);
+          resolved[i] = 2;   // resolved this pass — held back from other pixels' averages until the pass ends
+          changed = true;
+        } else remaining++;
+      }
+    }
+    for (let i = 0; i < n; i++) if (resolved[i] === 2) resolved[i] = 1;
+    if (!remaining || !changed) break;
+  }
+
+  const patch = document.createElement('canvas');
+  patch.width = w; patch.height = h;
+  patch.getContext('2d').putImageData(src, 0, 0);
+  return { dataUrl: patch.toDataURL('image/png'), x1: x1 / s, y1: y1 / s, x2: x2 / s, y2: y2 / s };
 }
 // A line counts as a sub/superscript candidate only if its glyphs are smaller than this fraction of the
 // host line's, and it is made of no more than this many separately-drawn pieces. Page text keeps the
@@ -3925,7 +4092,7 @@ function coverRectsClose(a, b) {
 }
 // Figures out which of a page's already-detected blocks don't yet have a matching text-box
 // annotation, and returns the new annotation objects for them — not yet added to App state.
-// This is exactly what committing an unchanged sensed block produces (a whiteout patch plus a
+// This is exactly what committing an unchanged sensed block produces (a real erase patch plus a
 // text annotation matching its font, size, color, weight and alignment). Shared by the
 // single-page and whole-document conversions below so both use the same "already converted"
 // check and the same annotation shape.
@@ -3939,12 +4106,14 @@ function blocksToNewAnnotations(pageNum, blocks) {
     } else if (list.some((a) => a.type === 'text' && a.coverRect && coverRectsClose(a.coverRect, b.bbox))) {
       continue;
     }
+    const erase = buildEraseImage(pageNum, b.bbox);
     const ann = {
       id: genId(), type: 'text', text: b.text, x: b.x, y: b.y,
       color: b.color, fontSize: b.fontSize, fontFamily: b.fontFamily,
       bold: !!b.bold, italic: !!b.italic, underline: false, superscript: false, subscript: false,
       align: b.align || 'left', lineHeight: clampLineHeight(b.lineHeight),
-      coverRect: { ...b.bbox }, coverColor: b.bgColor || '#ffffff',
+      coverRect: erase ? { x1: erase.x1, y1: erase.y1, x2: erase.x2, y2: erase.y2 } : { ...b.bbox },
+      ...(erase ? { eraseImage: erase.dataUrl } : {}),
       ...(b.annotId ? { replacesAnnotId: b.annotId } : {})
     };
     if (Array.isArray(b.runs) && b.runs.length) {
@@ -4410,7 +4579,7 @@ async function loadPDFBytes(buf, meta = {}) {
     App.currentFileSize = meta.size || bytes.byteLength;
     docTitle.textContent = App.currentFileName;
     docTitle.title = App.currentFileName;
-    App.pageAnnotations = {}; App.comments = []; App.imageCache = {};
+    App.pageAnnotations = {}; App.comments = []; App.imageCache = {}; App.eraseImageCache = {};
     App.pageTextBlocks = {}; App.pageTextScanning = {}; App.senseHover = null;
     ensurePageLists();
     App.selected = null; App.selDrag = null; App.gesture = null;
