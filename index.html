@@ -11,60 +11,136 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@600&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,500&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
 
-  <!-- Colour tokens live in plain CSS so the page follows the viewer's light / dark setting -->
+  <!-- Applies the saved theme (and colour-scheme) before first paint, so there's never a flash of
+       the wrong palette on reload. Reads straight from localStorage — synchronous, no network. -->
+  <script>
+    (function () {
+      try {
+        var raw = localStorage.getItem('acromark:settings:v1');
+        var theme = raw && JSON.parse(raw).theme;
+        if (!theme || !document.createElement('div')) throw 0;
+        document.documentElement.setAttribute('data-theme', theme);
+      } catch (e) {
+        var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.setAttribute('data-theme', dark ? 'black-gold' : 'gold');
+      }
+    })();
+  </script>
+
+  <!-- Colour tokens live in plain CSS, one full palette per theme, switched by [data-theme] on <html>.
+       "ink" is the brand/action scale (primary buttons, active tool, selection) — it's what actually
+       changes character between themes; the rest is background/text scaffolding tuned to match. -->
   <style>
     :root {
+      /* fallback = Classic Gold, used only if the bootstrap script above couldn't run */
       color-scheme: light;
-      --canvas: 246 243 236;
-      --surface: 253 251 247;
-      --raised: 238 233 222;
-      --sunken: 227 222 211;
-      --hairline: 221 214 199;
-      --hairline2: 196 187 168;
-      --fg: 29 27 23;
-      --muted: 102 98 88;
-      --faint: 120 115 102;
-      --danger: 200 45 50;
-      --accent: 148 92 24;
-      --accent-hi: 112 70 16;
-      --scroll: 196 187 168;
-      --scroll-hi: 170 160 140;
+      --canvas: 246 243 236; --surface: 253 251 247; --raised: 238 233 222; --sunken: 227 222 211;
+      --hairline: 221 214 199; --hairline2: 196 187 168;
+      --fg: 29 27 23; --muted: 102 98 88; --faint: 120 115 102; --danger: 200 45 50;
+      --accent: 148 92 24; --accent-hi: 112 70 16; --scroll: 196 187 168; --scroll-hi: 170 160 140;
+      --ink-50: 251 244 228; --ink-100: 245 227 190; --ink-200: 236 201 136; --ink-300: 224 172 92;
+      --ink-400: 211 146 60; --ink-500: 189 122 41; --ink-600: 156 100 32; --ink-700: 122 78 28;
+      --ink-800: 90 58 23; --ink-900: 61 40 17; --ink-contrast: 26 21 9;
     }
-    @media (prefers-color-scheme: dark) {
-      :root:not([data-theme="light"]) {
-        color-scheme: dark;
-        --canvas: 18 19 22;
-        --surface: 26 28 32;
-        --raised: 33 36 41;
-        --sunken: 11 12 14;
-        --hairline: 42 45 51;
-        --hairline2: 58 62 70;
-        --fg: 242 238 226;
-        --muted: 147 150 158;
-        --faint: 123 126 135;
-        --danger: 229 72 77;
-        --accent: 224 172 92;
-        --accent-hi: 236 201 136;
-        --scroll: 58 62 70;
-        --scroll-hi: 74 79 89;
-      }
+    :root[data-theme="gold"] {
+      color-scheme: light;
+      --canvas: 246 243 236; --surface: 253 251 247; --raised: 238 233 222; --sunken: 227 222 211;
+      --hairline: 221 214 199; --hairline2: 196 187 168;
+      --fg: 29 27 23; --muted: 102 98 88; --faint: 120 115 102; --danger: 200 45 50;
+      --accent: 148 92 24; --accent-hi: 112 70 16; --scroll: 196 187 168; --scroll-hi: 170 160 140;
+      --ink-50: 251 244 228; --ink-100: 245 227 190; --ink-200: 236 201 136; --ink-300: 224 172 92;
+      --ink-400: 211 146 60; --ink-500: 189 122 41; --ink-600: 156 100 32; --ink-700: 122 78 28;
+      --ink-800: 90 58 23; --ink-900: 61 40 17; --ink-contrast: 26 21 9;
     }
-    :root[data-theme="dark"] {
+    :root[data-theme="black-gold"] {
       color-scheme: dark;
-      --canvas: 18 19 22;
-      --surface: 26 28 32;
-      --raised: 33 36 41;
-      --sunken: 11 12 14;
-      --hairline: 42 45 51;
-      --hairline2: 58 62 70;
-      --fg: 242 238 226;
-      --muted: 147 150 158;
-      --faint: 123 126 135;
-      --danger: 229 72 77;
-      --accent: 224 172 92;
-      --accent-hi: 236 201 136;
-      --scroll: 58 62 70;
-      --scroll-hi: 74 79 89;
+      --canvas: 18 19 22; --surface: 26 28 32; --raised: 33 36 41; --sunken: 11 12 14;
+      --hairline: 42 45 51; --hairline2: 58 62 70;
+      --fg: 242 238 226; --muted: 147 150 158; --faint: 123 126 135; --danger: 229 72 77;
+      --accent: 224 172 92; --accent-hi: 236 201 136; --scroll: 58 62 70; --scroll-hi: 74 79 89;
+      --ink-50: 251 244 228; --ink-100: 245 227 190; --ink-200: 236 201 136; --ink-300: 224 172 92;
+      --ink-400: 211 146 60; --ink-500: 189 122 41; --ink-600: 156 100 32; --ink-700: 122 78 28;
+      --ink-800: 90 58 23; --ink-900: 61 40 17; --ink-contrast: 26 21 9;
+    }
+    :root[data-theme="blue-gold"] {
+      color-scheme: dark;
+      --canvas: 13 18 30; --surface: 19 26 42; --raised: 26 34 52; --sunken: 8 12 22;
+      --hairline: 34 44 64; --hairline2: 48 60 84;
+      --fg: 230 236 248; --muted: 140 152 178; --faint: 112 124 150; --danger: 229 72 77;
+      --accent: 212 175 55; --accent-hi: 230 196 86; --scroll: 48 60 84; --scroll-hi: 64 78 104;
+      --ink-50: 251 246 227; --ink-100: 245 233 190; --ink-200: 233 209 138; --ink-300: 212 175 55;
+      --ink-400: 193 154 46; --ink-500: 168 132 42; --ink-600: 138 108 34; --ink-700: 108 84 27;
+      --ink-800: 79 61 20; --ink-900: 51 39 13; --ink-contrast: 22 17 6;
+    }
+    :root[data-theme="emerald"] {
+      color-scheme: dark;
+      --canvas: 10 18 15; --surface: 15 26 21; --raised: 21 35 28; --sunken: 6 12 9;
+      --hairline: 28 46 36; --hairline2: 40 64 50;
+      --fg: 226 242 232; --muted: 140 164 150; --faint: 112 136 122; --danger: 229 72 77;
+      --accent: 52 211 153; --accent-hi: 110 231 183; --scroll: 40 64 50; --scroll-hi: 54 84 66;
+      --ink-50: 232 251 243; --ink-100: 198 246 224; --ink-200: 126 233 188; --ink-300: 52 211 153;
+      --ink-400: 34 184 133; --ink-500: 20 150 110; --ink-600: 16 120 90; --ink-700: 13 94 70;
+      --ink-800: 10 70 52; --ink-900: 7 48 36; --ink-contrast: 8 28 22;
+    }
+    :root[data-theme="crimson"] {
+      color-scheme: dark;
+      --canvas: 20 18 18; --surface: 28 25 25; --raised: 36 32 32; --sunken: 13 11 11;
+      --hairline: 48 43 43; --hairline2: 66 58 58;
+      --fg: 240 234 232; --muted: 158 148 146; --faint: 130 122 120; --danger: 229 72 77;
+      --accent: 213 64 88; --accent-hi: 232 110 132; --scroll: 48 43 43; --scroll-hi: 66 58 58;
+      --ink-50: 251 232 234; --ink-100: 245 198 204; --ink-200: 227 138 151; --ink-300: 199 42 67;
+      --ink-400: 168 31 55; --ink-500: 138 26 46; --ink-600: 110 21 37; --ink-700: 84 17 29;
+      --ink-800: 60 13 21; --ink-900: 38 9 14; --ink-contrast: 26 10 13;
+    }
+    :root[data-theme="teal"] {
+      color-scheme: dark;
+      --canvas: 9 20 22; --surface: 14 28 31; --raised: 19 37 41; --sunken: 5 14 16;
+      --hairline: 26 50 55; --hairline2: 36 68 74;
+      --fg: 224 242 244; --muted: 140 168 172; --faint: 112 140 144; --danger: 229 72 77;
+      --accent: 45 212 191; --accent-hi: 94 234 212; --scroll: 36 68 74; --scroll-hi: 48 88 96;
+      --ink-50: 230 251 248; --ink-100: 184 245 236; --ink-200: 110 231 216; --ink-300: 45 212 191;
+      --ink-400: 31 179 160; --ink-500: 24 146 130; --ink-600: 19 116 104; --ink-700: 15 90 80;
+      --ink-800: 11 66 59; --ink-900: 8 46 41; --ink-contrast: 6 28 25;
+    }
+    :root[data-theme="violet"] {
+      color-scheme: dark;
+      --canvas: 18 14 24; --surface: 27 21 35; --raised: 35 28 45; --sunken: 12 9 17;
+      --hairline: 46 38 58; --hairline2: 62 52 78;
+      --fg: 236 230 244; --muted: 158 148 172; --faint: 130 120 146; --danger: 229 72 77;
+      --accent: 167 139 250; --accent-hi: 196 181 253; --scroll: 46 38 58; --scroll-hi: 62 52 78;
+      --ink-50: 243 239 254; --ink-100: 224 212 252; --ink-200: 196 176 249; --ink-300: 167 139 250;
+      --ink-400: 139 108 240; --ink-500: 114 86 204; --ink-600: 92 68 168; --ink-700: 71 52 130;
+      --ink-800: 51 38 96; --ink-900: 34 25 66; --ink-contrast: 20 14 36;
+    }
+    :root[data-theme="silver"] {
+      color-scheme: dark;
+      --canvas: 16 16 17; --surface: 24 24 25; --raised: 32 32 33; --sunken: 10 10 11;
+      --hairline: 42 42 43; --hairline2: 60 60 62;
+      --fg: 240 240 240; --muted: 152 152 154; --faint: 124 124 126; --danger: 229 72 77;
+      --accent: 184 190 199; --accent-hi: 215 219 225; --scroll: 60 60 62; --scroll-hi: 78 78 80;
+      --ink-50: 245 246 247; --ink-100: 228 230 233; --ink-200: 203 208 214; --ink-300: 180 186 195;
+      --ink-400: 139 147 160; --ink-500: 112 120 132; --ink-600: 88 95 106; --ink-700: 66 72 82;
+      --ink-800: 48 53 61; --ink-900: 32 35 41; --ink-contrast: 14 15 17;
+    }
+    :root[data-theme="rose"] {
+      color-scheme: light;
+      --canvas: 250 240 240; --surface: 255 247 247; --raised: 243 225 225; --sunken: 234 212 212;
+      --hairline: 227 200 200; --hairline2: 205 170 170;
+      --fg: 40 24 26; --muted: 110 80 84; --faint: 130 100 104; --danger: 200 45 50;
+      --accent: 184 92 107; --accent-hi: 143 63 76; --scroll: 205 170 170; --scroll-hi: 184 145 145;
+      --ink-50: 253 241 240; --ink-100: 248 218 220; --ink-200: 239 185 190; --ink-300: 222 142 150;
+      --ink-400: 201 103 116; --ink-500: 176 79 90; --ink-600: 143 63 76; --ink-700: 112 49 60;
+      --ink-800: 82 36 45; --ink-900: 54 24 30; --ink-contrast: 42 16 20;
+    }
+    :root[data-theme="sage"] {
+      color-scheme: light;
+      --canvas: 241 244 236; --surface: 249 251 246; --raised: 228 233 219; --sunken: 213 220 201;
+      --hairline: 205 214 190; --hairline2: 178 190 160;
+      --fg: 26 32 20; --muted: 90 100 78; --faint: 110 120 96; --danger: 200 45 50;
+      --accent: 75 122 74; --accent-hi: 54 90 54; --scroll: 178 190 160; --scroll-hi: 154 168 132;
+      --ink-50: 241 247 238; --ink-100: 220 235 211; --ink-200: 182 214 164; --ink-300: 140 190 114;
+      --ink-400: 103 162 76; --ink-500: 78 138 58; --ink-600: 60 112 44; --ink-700: 46 88 34;
+      --ink-800: 34 64 25; --ink-900: 22 42 16; --ink-contrast: 16 26 10;
     }
   </style>
 
@@ -83,8 +159,9 @@
               accent: ch('accent'), 'accent-hi': ch('accent-hi'),
               paper: '#f2eee2',
               ink: {
-                50: '#fbf4e4', 100: '#f5e3be', 200: '#ecc988', 300: '#e0ac5c', 400: '#d3923c',
-                500: '#bd7a29', 600: '#9c6420', 700: '#7a4e1c', 800: '#5a3a17', 900: '#3d2811'
+                50: ch('ink-50'), 100: ch('ink-100'), 200: ch('ink-200'), 300: ch('ink-300'), 400: ch('ink-400'),
+                500: ch('ink-500'), 600: ch('ink-600'), 700: ch('ink-700'), 800: ch('ink-800'), 900: ch('ink-900'),
+                contrast: ch('ink-contrast')
               }
             },
             fontFamily: {
@@ -131,7 +208,7 @@
        click or a draw/select interaction. That focus has no visible meaning to the user, so it
        should never draw a ring — most noticeably wrapping the whole document — around itself. */
     #viewport:focus, #viewport:focus-visible { outline: none; }
-    ::selection { background: #d3923c; color: #17130d; }
+    ::selection { background: rgb(var(--ink-400)); color: rgb(var(--ink-contrast)); }
     input, textarea, .selectable { -webkit-user-select: text; user-select: text; }
 
     ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -175,12 +252,12 @@
     .comment-pin { position: absolute; z-index: 5; width: 26px; height: 26px; margin: -31px 0 0 -13px; padding: 0; background: none; border: 0; cursor: pointer; }
     .comment-pin .pin-body {
       display: flex; align-items: center; justify-content: center; width: 100%; height: 100%;
-      background: #e0ac5c; color: #1a1509; border: 2px solid rgb(var(--canvas));
+      background: rgb(var(--ink-300)); color: rgb(var(--ink-contrast)); border: 2px solid rgb(var(--canvas));
       border-radius: 50% 50% 50% 0; transform: rotate(-45deg); box-shadow: 0 3px 8px rgb(0 0 0 / 0.35);
       transition: transform 0.15s ease, background 0.15s ease;
     }
     .comment-pin .pin-body > span { transform: rotate(45deg); font: 700 11px "IBM Plex Sans", sans-serif; line-height: 1; }
-    .comment-pin:hover .pin-body { background: #ecc988; transform: rotate(-45deg) scale(1.1); }
+    .comment-pin:hover .pin-body { background: rgb(var(--ink-200)); transform: rotate(-45deg) scale(1.1); }
     .comment-pin.pulse .pin-body { transform: rotate(-45deg) scale(1.35); }
 
     /* ---------- inline text editor ----------
@@ -197,7 +274,7 @@
     /* ---------- toolbar bits ---------- */
     .tool-btn { padding: 0.625rem; border-radius: 0.75rem; color: rgb(var(--muted)); transition: background 0.12s, color 0.12s; }
     .tool-btn:hover { background: rgb(var(--raised)); color: rgb(var(--fg)); }
-    .tool-btn.active { background: #e0ac5c; color: #1a1509; }
+    .tool-btn.active { background: rgb(var(--ink-300)); color: rgb(var(--ink-contrast)); }
     .swatch { width: 20px; height: 20px; border-radius: 9999px; box-shadow: 0 0 0 1px rgb(var(--hairline2)); transition: box-shadow 0.12s; flex: none; }
     .swatch.active { box-shadow: 0 0 0 2px rgb(var(--canvas)), 0 0 0 4px rgb(var(--accent)); }
     /* The native <input type="color"> swatch chip is drawn by the browser's own widget theme,
@@ -223,7 +300,23 @@
     kbd.kb-current { min-width: 2.4em; text-align: center; }
     .seg { padding: 0.375rem 0.75rem; font-size: 0.75rem; font-weight: 600; border-radius: 0.5rem; color: rgb(var(--muted)); }
     .seg.active { background: rgb(var(--raised)); color: rgb(var(--fg)); box-shadow: inset 0 0 0 1px rgb(var(--hairline2)); }
-    .thumb-item.current .thumb-frame { box-shadow: 0 0 0 2px #d3923c; }
+    .thumb-item.current .thumb-frame { box-shadow: 0 0 0 2px rgb(var(--ink-400)); }
+    #sizeSlider, #opacitySlider { accent-color: rgb(var(--ink-400)); }
+    .brand-mark path { stroke: rgb(var(--ink-300)); }
+    .brand-mark circle { fill: rgb(var(--ink-300)); }
+
+    /* ---------- theme picker ---------- */
+    .theme-swatch {
+      width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 0.6rem;
+      transition: background 0.12s; text-align: left;
+    }
+    .theme-swatch:hover { background: rgb(var(--hairline)); }
+    .theme-swatch[aria-checked="true"] { background: rgb(var(--raised)); box-shadow: inset 0 0 0 1px rgb(var(--hairline2)); }
+    .theme-swatch .swatch-dot {
+      width: 26px; height: 26px; border-radius: 9999px; flex: none; box-shadow: 0 0 0 1px rgb(var(--hairline2));
+    }
+    .theme-swatch .theme-check { margin-left: auto; opacity: 0; flex: none; }
+    .theme-swatch[aria-checked="true"] .theme-check { opacity: 1; }
   </style>
 </head>
 <body class="flex flex-col overflow-hidden select-none" data-tool="pen">
@@ -233,9 +326,9 @@
     <div class="flex items-center gap-3 min-w-0">
       <div class="flex items-center gap-2 shrink-0">
         <div class="w-8 h-8 rounded-lg bg-accent/15 border border-accent/30 flex items-center justify-center">
-          <svg viewBox="0 0 100 100" class="w-4 h-4" fill="none" aria-hidden="true">
-            <path d="M30 66 L66 30" stroke="#e0ac5c" stroke-width="12" stroke-linecap="round"/>
-            <circle cx="74" cy="22" r="9" fill="#e0ac5c"/>
+          <svg viewBox="0 0 100 100" class="w-4 h-4 brand-mark" fill="none" aria-hidden="true">
+            <path d="M30 66 L66 30" stroke-width="12" stroke-linecap="round"/>
+            <circle cx="74" cy="22" r="9"/>
           </svg>
         </div>
         <span class="font-display text-[17px] text-fg">AcroMark</span>
@@ -266,12 +359,22 @@
 
     <!-- ACTION BUTTONS -->
     <div class="flex items-center gap-1.5 sm:gap-2">
+      <div class="relative">
+        <button id="btnThemeMenuToggle" aria-haspopup="menu" aria-expanded="false" aria-label="Change theme" class="bg-raised hover:bg-hairline text-muted hover:text-fg p-2 rounded-xl transition" title="Theme">
+          <i data-lucide="palette" class="w-4 h-4"></i>
+        </button>
+        <div id="themeMenu" role="menu" aria-label="Theme" class="hidden absolute right-0 mt-2 w-64 bg-raised border border-hairline2 rounded-xl shadow-2xl z-40 modal-pop p-2">
+          <p class="px-2 pt-1 pb-2 text-[10px] font-semibold uppercase tracking-wide text-faint">Theme</p>
+          <div id="themeMenuList" class="max-h-[60vh] overflow-y-auto flex flex-col gap-0.5"></div>
+          <p class="px-2 pt-2 pb-1 text-[10px] text-faint border-t border-hairline mt-2">Saved on this device only.</p>
+        </div>
+      </div>
       <button id="btnHelp" aria-label="Keyboard shortcuts" class="bg-raised hover:bg-hairline text-muted hover:text-fg p-2 rounded-xl transition" title="Keyboard shortcuts (?)">
         <i data-lucide="circle-help" class="w-4 h-4"></i>
       </button>
       <button id="btnToggleComments" aria-label="Toggle comments panel" class="relative bg-raised hover:bg-hairline text-muted hover:text-fg p-2 rounded-xl transition" title="Toggle comments panel">
         <i data-lucide="message-square" class="w-4 h-4"></i>
-        <span id="commentBadgeHeader" class="hidden absolute -top-1 -right-1 bg-ink-300 text-[#1a1509] text-[9px] font-bold rounded-full w-4 h-4 flex items-center justify-center">0</span>
+        <span id="commentBadgeHeader" class="hidden absolute -top-1 -right-1 bg-ink-300 text-ink-contrast text-[9px] font-bold rounded-full w-4 h-4 flex items-center justify-center">0</span>
       </button>
       <button id="btnLoadSample" class="bg-raised hover:bg-hairline text-fg/90 text-xs font-semibold px-3 py-2 rounded-xl transition hidden md:block">
         Load Sample
@@ -283,7 +386,7 @@
       </label>
 
       <div class="relative">
-        <button id="btnExportMenuToggle" aria-haspopup="menu" aria-expanded="false" class="bg-ink-300 hover:bg-ink-200 text-[#1a1509] text-xs font-semibold px-3 sm:px-4 py-2 rounded-xl transition flex items-center gap-1.5 shadow-sm shadow-black/30">
+        <button id="btnExportMenuToggle" aria-haspopup="menu" aria-expanded="false" class="bg-ink-300 hover:bg-ink-200 text-ink-contrast text-xs font-semibold px-3 sm:px-4 py-2 rounded-xl transition flex items-center gap-1.5 shadow-sm shadow-black/30">
           <i data-lucide="download" class="w-4 h-4"></i>
           <span class="hidden sm:inline">Export</span>
           <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
@@ -342,13 +445,13 @@
 
     <div class="flex items-center gap-2 shrink-0">
       <span id="sizeLabel" class="text-muted font-medium">Stroke Size:</span>
-      <input type="range" id="sizeSlider" min="1" max="25" value="3" class="w-24 accent-[#d3923c] cursor-pointer" aria-label="Stroke size" />
+      <input type="range" id="sizeSlider" min="1" max="25" value="3" class="w-24 cursor-pointer" aria-label="Stroke size" />
       <input type="text" id="sizeValueLabel" inputmode="decimal" autocomplete="off" spellcheck="false" class="no-spinner w-11 bg-transparent text-center text-xs font-semibold outline-none rounded focus:bg-raised" aria-label="Size value" value="3" />
     </div>
 
     <div id="opacityControl" class="hidden items-center gap-2 shrink-0">
       <span class="text-muted font-medium">Opacity:</span>
-      <input type="range" id="opacitySlider" min="10" max="80" value="35" class="w-20 accent-[#d3923c] cursor-pointer" aria-label="Highlighter opacity" />
+      <input type="range" id="opacitySlider" min="10" max="80" value="35" class="w-20 cursor-pointer" aria-label="Highlighter opacity" />
       <span id="opacityValueLabel" class="w-9 text-center">35%</span>
     </div>
 
@@ -475,15 +578,15 @@
       <div id="landingScreen" class="absolute inset-0 flex items-center justify-center overflow-y-auto">
         <div class="landing-rise flex flex-col items-center text-center max-w-md mx-auto py-10 px-6 w-full">
           <div class="w-14 h-14 rounded-2xl bg-accent/15 border border-accent/30 flex items-center justify-center mb-6">
-            <svg viewBox="0 0 100 100" class="w-7 h-7" fill="none" aria-hidden="true">
-              <path d="M30 66 L66 30" stroke="#e0ac5c" stroke-width="10" stroke-linecap="round"/>
-              <circle cx="74" cy="22" r="8" fill="#e0ac5c"/>
+            <svg viewBox="0 0 100 100" class="w-7 h-7 brand-mark" fill="none" aria-hidden="true">
+              <path d="M30 66 L66 30" stroke-width="10" stroke-linecap="round"/>
+              <circle cx="74" cy="22" r="8"/>
             </svg>
           </div>
           <h1 class="font-display text-2xl sm:text-[28px] text-fg leading-snug">Mark up any PDF, right in your browser</h1>
           <p class="text-sm text-muted mt-3 leading-relaxed">Draw, highlight, comment and sign. Nothing is uploaded — your document stays on this device from start to finish.</p>
           <div class="flex flex-col sm:flex-row gap-3 mt-7 w-full sm:w-auto">
-            <button id="btnLandingOpen" class="inline-flex items-center justify-center gap-1.5 bg-ink-300 hover:bg-ink-200 text-[#1a1509] text-sm font-semibold px-5 py-2.5 rounded-xl transition shadow-sm shadow-black/30">
+            <button id="btnLandingOpen" class="inline-flex items-center justify-center gap-1.5 bg-ink-300 hover:bg-ink-200 text-ink-contrast text-sm font-semibold px-5 py-2.5 rounded-xl transition shadow-sm shadow-black/30">
               <i data-lucide="upload" class="w-4 h-4"></i>
               Open a PDF
             </button>
@@ -554,7 +657,7 @@
       </div>
       <div class="p-4 border-t border-hairline bg-canvas/40 flex justify-between">
         <button id="btnClearSig" class="px-3 py-1.5 text-xs text-muted hover:text-fg">Clear</button>
-        <button id="btnInsertSig" class="px-4 py-1.5 bg-ink-300 hover:bg-ink-200 text-[#1a1509] text-xs font-semibold rounded-xl transition">Place on page</button>
+        <button id="btnInsertSig" class="px-4 py-1.5 bg-ink-300 hover:bg-ink-200 text-ink-contrast text-xs font-semibold rounded-xl transition">Place on page</button>
       </div>
     </div>
   </div>
@@ -572,7 +675,7 @@
       </div>
       <div class="p-4 border-t border-hairline bg-canvas/40 flex justify-end gap-2">
         <button id="btnCancelComment" class="px-3.5 py-1.5 text-xs text-muted hover:text-fg">Cancel</button>
-        <button id="btnSaveComment" class="px-4 py-1.5 bg-ink-300 hover:bg-ink-200 text-[#1a1509] text-xs font-semibold rounded-xl transition">Drop pin</button>
+        <button id="btnSaveComment" class="px-4 py-1.5 bg-ink-300 hover:bg-ink-200 text-ink-contrast text-xs font-semibold rounded-xl transition">Drop pin</button>
       </div>
     </div>
   </div>
@@ -1211,6 +1314,11 @@ function formatSizeValue(n) {
   return Number.isInteger(r) ? String(r) : r.toFixed(1);
 }
 function debounce(fn, ms) { let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); }; }
+// Reads a themed colour token straight off the root element, so canvas-drawn UI (which can't use
+// CSS variables directly) always matches whichever palette is currently active. Cheap enough to
+// call per-draw; a full redraw is triggered on every theme change anyway (see applyTheme).
+const rootStyle = getComputedStyle(document.documentElement);
+function themeRGB(varName) { return `rgb(${rootStyle.getPropertyValue('--' + varName).trim()})`; }
 function renderIcons() { try { if (window.lucide) lucide.createIcons(); } catch (e) { /* icons are decorative */ } }
 
 // ---- DOM refs ----
@@ -1323,7 +1431,7 @@ function openConfirm({ title, message, confirmLabel = 'Confirm', danger = true }
   btnConfirmOk.textContent = confirmLabel;
   btnConfirmOk.className = danger
     ? 'px-4 py-1.5 bg-danger hover:bg-danger/85 text-white text-xs font-semibold rounded-xl transition'
-    : 'px-4 py-1.5 bg-ink-300 hover:bg-ink-200 text-[#1a1509] text-xs font-semibold rounded-xl transition';
+    : 'px-4 py-1.5 bg-ink-300 hover:bg-ink-200 text-ink-contrast text-xs font-semibold rounded-xl transition';
   confirmModal.classList.remove('hidden');
   requestAnimationFrame(() => btnConfirmOk.focus());
   return new Promise((resolve) => { confirmResolver = resolve; });
@@ -1564,6 +1672,7 @@ function getFileKey() {
   return `acromark_v1::${App.currentFileName || 'sample'}::${App.currentFileSize || 0}::${App.numPages}`;
 }
 function scheduleAutosave() {
+  scheduleSettingsSave();
   if (!App.fileKey) return;
   clearTimeout(autosaveTimer);
   const key = App.fileKey;
@@ -1941,15 +2050,15 @@ function getSelectionGeometry(pageNum) {
 }
 function drawSelectionOverlay(ctx, sel) {
   ctx.save();
-  ctx.strokeStyle = '#d3923c'; ctx.setLineDash([6, 4]); ctx.lineWidth = 1.5;
+  ctx.strokeStyle = themeRGB('ink-400'); ctx.setLineDash([6, 4]); ctx.lineWidth = 1.5;
   ctx.strokeRect(sel.rect.x1, sel.rect.y1, sel.rect.x2 - sel.rect.x1, sel.rect.y2 - sel.rect.y1);
   ctx.setLineDash([]);
   sel.handles.forEach((h) => {
     ctx.beginPath(); ctx.arc(h.x, h.y, 5.5, 0, Math.PI * 2);
-    ctx.fillStyle = '#d3923c'; ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = themeRGB('ink-400'); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
   });
   ctx.beginPath(); ctx.arc(sel.badge.cx, sel.badge.cy, sel.badge.r, 0, Math.PI * 2);
-  ctx.fillStyle = '#e5484d'; ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = themeRGB('danger'); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
   ctx.fillStyle = '#fff'; ctx.font = '700 13px Arial, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillText('\u00D7', sel.badge.cx, sel.badge.cy + 0.5);
   ctx.restore();
@@ -2350,6 +2459,7 @@ function updatePageIndicator() {
   btnPrevPage.disabled = !App.pdfDoc || App.activePage <= 1;
   btnNextPage.disabled = !App.pdfDoc || App.activePage >= App.numPages;
   updateActiveThumbnail();
+  scheduleSettingsSave();
 }
 function scrollToPage(n, behavior = 'smooth') {
   n = clamp(n, 1, App.numPages || 1);
@@ -2430,6 +2540,7 @@ function setScale(newScale) {
   syncAllPins();
   restoreAnchor(anchor);
   updateVisible();
+  scheduleSettingsSave();
 }
 
 // =======================================================================
@@ -4396,6 +4507,7 @@ function setTool(tool) {
     if (!App.senseIntroShown) { App.senseIntroShown = true; showToast('Detecting text… click any line or paragraph to edit it in place.'); }
     Object.keys(App.pageState).forEach((k) => { if (App.pageState[k].rendered) ensureTextBlocks(+k); });
   }
+  scheduleSettingsSave();
 }
 function beginStyleEdit() { if (!App.styleEditOpen) { pushHistory(); App.styleEditOpen = true; } }
 
@@ -4432,6 +4544,7 @@ function applyTextStyle(patch) {
     scheduleAutosave();
   } else {
     Object.assign(App, patch);
+    scheduleSettingsSave();
   }
   syncTextStyleButtons();
 }
@@ -4501,7 +4614,7 @@ function refreshControls() {
 function setColor(hex) {
   document.querySelectorAll('#colorPalette .swatch').forEach((b) => b.classList.toggle('active', b.dataset.color === hex));
   syncCustomSwatchActive(hex);
-  if (activeTextEditor) { App.color = hex; activeTextEditor.setStyle({ color: hex }); return; }
+  if (activeTextEditor) { App.color = hex; activeTextEditor.setStyle({ color: hex }); scheduleSettingsSave(); return; }
   App.color = hex;
   const sel = getSelectedAnnotation();
   if (sel && sel.type !== 'image') {
@@ -4509,6 +4622,8 @@ function setColor(hex) {
     if (sel.type === 'text') applyStyleToWholeTextAnnotation(sel, { color: hex }); else sel.color = hex;
     requestRedraw(App.selected.pageNum);
     scheduleAutosave();
+  } else {
+    scheduleSettingsSave();
   }
 }
 
@@ -5230,7 +5345,7 @@ sizeSlider.addEventListener('input', (e) => {
   sizeValueLabel.value = formatSizeValue(v);
   applySizeValue(v);
 });
-sizeSlider.addEventListener('change', () => { App.styleEditOpen = false; returnFocusToEditor(); });
+sizeSlider.addEventListener('change', () => { App.styleEditOpen = false; returnFocusToEditor(); scheduleSettingsSave(); });
 sizeSlider.addEventListener('pointerup', returnFocusToEditor);
 // The typed-value field is the decimal-accurate counterpart to the slider's coarse drag — type an
 // exact size (e.g. 13.5) and commit with Enter or by clicking away. Left blank while a text
@@ -5255,6 +5370,7 @@ sizeValueLabel.addEventListener('keydown', (e) => {
 sizeValueLabel.addEventListener('blur', () => {
   if (suppressSizeCommit) { suppressSizeCommit = false; refreshControls(); } else { commitSizeValueInput(); }
   App.styleEditOpen = false; returnFocusToEditor();
+  scheduleSettingsSave();
 });
 opacitySlider.addEventListener('input', (e) => {
   const v = +e.target.value;
@@ -5263,7 +5379,7 @@ opacitySlider.addEventListener('input', (e) => {
   if (sel && sel.type === 'highlighter') { beginStyleEdit(); sel.opacity = v / 100; requestRedraw(App.selected.pageNum); scheduleAutosave(); }
   else App.highlighterOpacity = v / 100;
 });
-opacitySlider.addEventListener('change', () => { App.styleEditOpen = false; });
+opacitySlider.addEventListener('change', () => { App.styleEditOpen = false; scheduleSettingsSave(); });
 
 $('btnZoomIn').addEventListener('click', () => stepZoom(1));
 $('btnZoomOut').addEventListener('click', () => stepZoom(-1));
@@ -5282,9 +5398,10 @@ $('btnToggleThumbnails').addEventListener('click', () => {
   if (!App.pdfDoc) { showToast('Open a PDF to see its pages here.'); return; }
   App.thumbsOpen = !App.thumbsOpen;
   applyThumbsState();
+  scheduleSettingsSave();
 });
-$('btnToggleComments').addEventListener('click', () => { App.sidebarOpen = !App.sidebarOpen; applySidebarState(); });
-$('btnCloseSidebar').addEventListener('click', () => { App.sidebarOpen = false; applySidebarState(); });
+$('btnToggleComments').addEventListener('click', () => { App.sidebarOpen = !App.sidebarOpen; applySidebarState(); scheduleSettingsSave(); });
+$('btnCloseSidebar').addEventListener('click', () => { App.sidebarOpen = false; applySidebarState(); scheduleSettingsSave(); });
 window.addEventListener('resize', debounce(() => { applySidebarState(); applyThumbsState(); requestVisibleUpdate(); }, 150));
 
 btnExportToggle.addEventListener('click', (e) => {
