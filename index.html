@@ -305,6 +305,37 @@
     .brand-mark path { stroke: rgb(var(--ink-300)); }
     .brand-mark circle { fill: rgb(var(--ink-300)); }
 
+    
+    /* ---------- whiteboard stack & canvas ---------- */
+    .wb-stack-card {
+      display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 0.75rem;
+      background: rgb(var(--surface)); border: 1px solid rgb(var(--hairline));
+      transition: all 0.15s ease; cursor: pointer; text-align: left; position: relative;
+    }
+    .wb-stack-card:hover {
+      background: rgb(var(--raised)); border-color: rgb(var(--accent));
+      transform: translateY(-2px); box-shadow: 0 6px 16px -4px rgba(0,0,0,0.3);
+    }
+    .wb-stack-card.active {
+      box-shadow: 0 0 0 2px rgb(var(--accent));
+    }
+    .wb-thumb-preview {
+      width: 58px; height: 38px; border-radius: 6px; border: 1px solid rgb(var(--hairline2));
+      background: #ffffff; flex: none; overflow: hidden; display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+    }
+    .wb-thumb-preview img {
+      width: 100%; height: 100%; object-fit: contain; display: block;
+    }
+    #wbViewport {
+      background-color: rgb(var(--sunken));
+      background-image: radial-gradient(circle at 1px 1px, rgb(var(--fg) / 0.07) 1px, transparent 0);
+      background-size: 26px 26px;
+    }
+    #wbBoardWrap {
+      box-shadow: 0 22px 50px -14px rgb(0 0 0 / 0.45), 0 3px 8px rgb(0 0 0 / 0.18);
+    }
+
     /* ---------- theme picker ---------- */
     .theme-swatch {
       width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 0.6rem;
@@ -333,11 +364,23 @@
         </div>
         <span class="font-display text-[17px] text-fg">AcroMark</span>
       </div>
-      <span id="docTitle" class="text-xs text-muted border-l border-hairline pl-3 max-w-[140px] sm:max-w-[240px] truncate">No document loaded</span>
+      
+      <!-- TAB SWITCHER: PDF vs WHITEBOARD -->
+      <div class="flex items-center bg-raised p-1 rounded-xl border border-hairline shrink-0" role="tablist" aria-label="Editor views">
+        <button id="tabPdf" role="tab" aria-selected="true" class="seg active flex items-center gap-1.5 transition py-1 px-2.5" title="PDF Document Editor">
+          <i data-lucide="file-text" class="w-3.5 h-3.5"></i>
+          <span class="font-semibold text-xs">PDF</span>
+        </button>
+        <button id="tabWhiteboard" role="tab" aria-selected="false" class="seg flex items-center gap-1.5 transition py-1 px-2.5" title="Whiteboard Editor">
+          <i data-lucide="presentation" class="w-3.5 h-3.5"></i>
+          <span class="font-semibold text-xs">Whiteboard</span>
+        </button>
+      </div>
+      <span id="docTitle" class="text-xs text-muted border-l border-hairline pl-3 max-w-[120px] sm:max-w-[200px] truncate">No document loaded</span>
     </div>
 
     <!-- PAGE NAV + ZOOM -->
-    <div class="flex items-center gap-2 order-3 sm:order-none w-full sm:w-auto justify-center">
+    <div id="pdfNavControls" class="flex items-center gap-2 order-3 sm:order-none w-full sm:w-auto justify-center transition">
       <div class="flex items-center gap-1 bg-raised px-2 py-1 rounded-xl border border-hairline">
         <button id="btnPrevPage" aria-label="Previous page" class="p-1 hover:bg-hairline rounded transition disabled:opacity-30 disabled:cursor-not-allowed" title="Previous page">
           <i data-lucide="chevron-left" class="w-4 h-4"></i>
@@ -367,6 +410,33 @@
           <p class="px-2 pt-1 pb-2 text-[10px] font-semibold uppercase tracking-wide text-faint">Theme</p>
           <div id="themeMenuList" class="max-h-[60vh] overflow-y-auto flex flex-col gap-0.5"></div>
           <p class="px-2 pt-2 pb-1 text-[10px] text-faint border-t border-hairline mt-2">Saved on this device only.</p>
+        </div>
+      </div>
+      
+      <!-- WHITEBOARDS HOVER STACK BUTTON -->
+      <div class="relative" id="whiteboardStackWrap">
+        <button id="btnWhiteboardStack" aria-haspopup="menu" aria-expanded="false" class="bg-raised hover:bg-hairline text-muted hover:text-fg px-2.5 py-2 rounded-xl transition flex items-center gap-1.5 border border-hairline" title="Whiteboards — Hover to view, click to place on PDF">
+          <i data-lucide="layers" class="w-4 h-4 text-accent"></i>
+          <span class="text-xs font-semibold text-fg hidden lg:inline">Whiteboards</span>
+          <span id="wbBadge" class="bg-accent/15 text-accent text-[10px] font-bold px-1.5 py-0.5 rounded-full border border-accent/30">1</span>
+        </button>
+        <div id="whiteboardStackFlyout" role="menu" aria-label="Whiteboards stack" class="hidden absolute right-0 mt-2 w-80 bg-raised border border-hairline2 rounded-2xl shadow-2xl p-3 z-50 modal-pop">
+          <div class="flex items-center justify-between pb-2 mb-2 border-b border-hairline">
+            <div class="flex items-center gap-1.5">
+              <i data-lucide="presentation" class="w-4 h-4 text-accent"></i>
+              <span class="text-xs font-semibold text-fg">Whiteboards</span>
+            </div>
+            <button id="btnNewWhiteboardQuick" class="text-[11px] font-semibold text-accent hover:text-accent-hi flex items-center gap-1 transition">
+              <i data-lucide="plus" class="w-3.5 h-3.5"></i>
+              <span>New</span>
+            </button>
+          </div>
+          <p class="text-[11px] text-muted mb-2.5">Click any whiteboard to place it on the PDF page, or click Edit to draw.</p>
+          <div id="whiteboardStackList" class="max-h-[60vh] overflow-y-auto flex flex-col gap-2"></div>
+          <div class="pt-2.5 mt-2.5 border-t border-hairline flex justify-between items-center text-[10px] text-faint">
+            <span>Autosaved locally</span>
+            <button id="btnGoToWhiteboardTab" class="text-accent hover:underline font-medium">Open Editor &rarr;</button>
+          </div>
         </div>
       </div>
       <button id="btnHelp" aria-label="Keyboard shortcuts" class="bg-raised hover:bg-hairline text-muted hover:text-fg p-2 rounded-xl transition" title="Keyboard shortcuts (?)">
@@ -567,6 +637,51 @@
     <aside id="thumbnailsPanel" class="hidden w-[132px] border-r border-hairline bg-surface flex-col shrink-0 overflow-y-auto py-3 px-2.5 gap-2.5" aria-label="Page thumbnails">
       <div id="thumbnailsList" class="flex flex-col gap-2.5"></div>
     </aside>
+
+    <!-- WHITEBOARD WORKSPACE STAGE -->
+    <div id="whiteboardStage" class="hidden relative flex-1 min-w-0 flex-col h-full bg-sunken overflow-hidden select-none">
+      <!-- Whiteboard Subheader Bar -->
+      <div class="min-h-[44px] border-b border-hairline bg-surface/95 px-3 sm:px-5 py-1.5 flex flex-wrap items-center justify-between gap-3 shrink-0 z-10">
+        <div class="flex items-center gap-2 min-w-0">
+          <div class="w-7 h-7 rounded-lg bg-accent/15 border border-accent/30 flex items-center justify-center shrink-0">
+            <i data-lucide="presentation" class="w-4 h-4 text-accent"></i>
+          </div>
+          <input id="wbTitleInput" type="text" value="Whiteboard 1" maxlength="40" class="bg-transparent hover:bg-raised focus:bg-canvas text-xs font-semibold text-fg px-2 py-1 rounded-lg border border-transparent hover:border-hairline focus:border-ink-400 outline-none truncate max-w-[160px] sm:max-w-[220px]" title="Click to rename whiteboard" />
+          <span id="wbAutosaveIndicator" class="text-[11px] text-muted flex items-center gap-1 shrink-0">
+            <i data-lucide="check" class="w-3.5 h-3.5 text-emerald-500"></i>
+            <span>Saved</span>
+          </span>
+        </div>
+
+        <!-- Whiteboard Controls & Actions -->
+        <div class="flex items-center gap-2 shrink-0">
+          <div class="flex items-center gap-1 bg-raised px-2 py-1 rounded-xl border border-hairline">
+            <button id="btnWbZoomOut" aria-label="Zoom out" class="p-1 hover:bg-hairline rounded transition" title="Zoom out (-)"><i data-lucide="zoom-out" class="w-3.5 h-3.5"></i></button>
+            <span id="wbZoomLabel" class="text-xs font-semibold px-1 min-w-[38px] text-center" aria-live="polite">100%</span>
+            <button id="btnWbZoomIn" aria-label="Zoom in" class="p-1 hover:bg-hairline rounded transition" title="Zoom in (+)"><i data-lucide="zoom-in" class="w-3.5 h-3.5"></i></button>
+          </div>
+          <button id="btnWbFit" class="bg-raised hover:bg-hairline text-fg/90 text-xs font-semibold px-2.5 py-1.5 rounded-xl border border-hairline transition hidden sm:block" title="Fit whiteboard to screen">Fit Board</button>
+          <button id="btnNewWhiteboard" class="bg-raised hover:bg-hairline text-fg/90 text-xs font-semibold px-2.5 py-1.5 rounded-xl border border-hairline transition flex items-center gap-1.5" title="Create a new whiteboard">
+            <i data-lucide="plus" class="w-3.5 h-3.5 text-accent"></i>
+            <span class="hidden sm:inline">New Whiteboard</span>
+          </button>
+          <button id="btnWbPlaceOnPdf" class="bg-ink-300 hover:bg-ink-200 text-ink-contrast text-xs font-semibold px-3 py-1.5 rounded-xl transition flex items-center gap-1.5 shadow-sm shadow-black/20" title="Place this whiteboard on the current PDF page">
+            <i data-lucide="file-down" class="w-3.5 h-3.5"></i>
+            <span>Place on PDF</span>
+          </button>
+          <button id="btnDeleteWhiteboard" class="bg-raised hover:bg-danger/20 hover:text-danger text-muted p-1.5 rounded-xl border border-hairline transition" title="Delete this whiteboard">
+            <i data-lucide="trash-2" class="w-4 h-4"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- Whiteboard Viewport -->
+      <main id="wbViewport" class="relative flex-1 overflow-auto flex items-center justify-center p-4 sm:p-8" tabindex="-1" aria-label="Whiteboard Canvas">
+        <div id="wbBoardWrap" class="relative bg-white rounded-xl shadow-2xl overflow-hidden flex-none border border-hairline2">
+          <canvas id="wbCanvas" class="block touch-none cursor-crosshair"></canvas>
+        </div>
+      </main>
+    </div>
 
     <!-- CENTER DOCUMENT STAGE -->
     <div id="stage" class="relative flex-1 min-w-0">
@@ -1097,6 +1212,21 @@ async function buildAnnotatedPdf(opts) {
             placeImage(img, a.x, a.y, a.x + a.width, a.y + a.height);
             break;
           }
+          case 'whiteboard': {
+            const wb = (typeof WhiteboardsStore !== 'undefined') ? WhiteboardsStore.get(a.whiteboardId) : null;
+            const dataUrl = (wb && wb.thumbnailDataUrl) || a.dataUrl;
+            if (dataUrl) {
+              try {
+                const bytes = bytesFromDataUrl(dataUrl);
+                const img = await doc.embedPng(bytes);
+                placeImage(img, a.x, a.y, a.x + a.width, a.y + a.height);
+              } catch (err) {
+                console.warn('AcroMark: could not embed whiteboard image into PDF', err);
+                skipped++;
+              }
+            }
+            break;
+          }
           default: skipped++;
         }
       } catch (err) {
@@ -1299,7 +1429,9 @@ const App = {
   imageCache: {},
   eraseImageCache: {},                 // annotation id -> decoded <img> for a.eraseImage (see buildEraseImage)
   busy: false,
-  sampling: false                      // true while the page-pixel eyedropper is armed
+  sampling: false,                     // true while the page-pixel eyedropper is armed
+  activeTab: 'pdf',
+  whiteboardImageCache: {}
 };
 
 let idCounter = 1;
@@ -1659,7 +1791,15 @@ function redo() {
   App.history.push(snapshotState());
   restoreSnapshot(App.future.pop());
 }
-function updateHistoryButtons() { btnUndo.disabled = App.history.length === 0; btnRedo.disabled = App.future.length === 0; }
+function updateHistoryButtons() {
+  if (App.activeTab === 'whiteboard' && typeof WbApp !== 'undefined') {
+    btnUndo.disabled = WbApp.history.length === 0;
+    btnRedo.disabled = WbApp.future.length === 0;
+  } else {
+    btnUndo.disabled = App.history.length === 0;
+    btnRedo.disabled = App.future.length === 0;
+  }
+}
 function resetHistory() { App.history = []; App.future = []; updateHistoryButtons(); }
 
 // =======================================================================
@@ -1724,6 +1864,16 @@ function getCachedImage(a, pageNum) {
   img.onload = () => { if (pageNum) requestRedraw(pageNum); };
   img.src = a.dataUrl;
   App.imageCache[a.id] = img;
+  return img;
+}
+function getCachedWhiteboardImage(id, dataUrl, pageNum) {
+  if (App.whiteboardImageCache[id] && App.whiteboardImageCache[id].src === dataUrl) {
+    return App.whiteboardImageCache[id];
+  }
+  const img = new Image();
+  img.onload = () => { if (pageNum) requestRedraw(pageNum); };
+  img.src = dataUrl;
+  App.whiteboardImageCache[id] = img;
   return img;
 }
 // Same idea as getCachedImage, for a sensed-text edit's erase patch (a.eraseImage — see
@@ -1873,6 +2023,45 @@ function drawAnnotation(ctx, a, s, pageNum) {
       if (img && img.complete && img.naturalWidth) ctx.drawImage(img, a.x * s, a.y * s, a.width * s, a.height * s);
       break;
     }
+    case 'whiteboard': {
+      const rx = a.x * s, ry = a.y * s, rw = a.width * s, rh = a.height * s;
+      ctx.save();
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.22)';
+      ctx.shadowBlur = 10 * s;
+      ctx.shadowOffsetY = 4 * s;
+      ctx.fillStyle = '#ffffff';
+      if (ctx.roundRect) {
+        ctx.beginPath(); ctx.roundRect(rx, ry, rw, rh, 6 * s); ctx.fill();
+      } else {
+        ctx.fillRect(rx, ry, rw, rh);
+      }
+      ctx.shadowColor = 'transparent';
+      ctx.restore();
+
+      const wb = (typeof WhiteboardsStore !== 'undefined') ? WhiteboardsStore.get(a.whiteboardId) : null;
+      const dataUrl = (wb && wb.thumbnailDataUrl) || a.dataUrl;
+      if (dataUrl) {
+        const img = getCachedWhiteboardImage(a.id, dataUrl, pageNum);
+        if (img && img.complete && img.naturalWidth) {
+          ctx.save();
+          if (ctx.roundRect) {
+            ctx.beginPath(); ctx.roundRect(rx, ry, rw, rh, 6 * s); ctx.clip();
+          }
+          ctx.drawImage(img, rx, ry, rw, rh);
+          ctx.restore();
+        }
+      }
+      ctx.save();
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.15)';
+      ctx.lineWidth = Math.max(1, 1 * s);
+      if (ctx.roundRect) {
+        ctx.beginPath(); ctx.roundRect(rx, ry, rw, rh, 6 * s); ctx.stroke();
+      } else {
+        ctx.strokeRect(rx, ry, rw, rh);
+      }
+      ctx.restore();
+      break;
+    }
   }
   ctx.restore();
 }
@@ -1957,6 +2146,7 @@ function getAnnotationBBox(a) {
       return bb;
     }
     case 'image': return { x1: a.x, y1: a.y, x2: a.x + a.width, y2: a.y + a.height };
+    case 'whiteboard': return { x1: a.x, y1: a.y, x2: a.x + a.width, y2: a.y + a.height };
     default: return { x1: 0, y1: 0, x2: 0, y2: 0 };
   }
 }
@@ -2043,7 +2233,7 @@ function getSelectionGeometry(pageNum) {
     // one repositions and resizes the shape around the other, which stays put.
     const h1 = toCanvasSpace({ x: a.x1, y: a.y1 }), h2 = toCanvasSpace({ x: a.x2, y: a.y2 });
     handles = [{ id: 'p1', x: h1.x, y: h1.y }, { id: 'p2', x: h2.x, y: h2.y }];
-  } else if (a.type === 'image') {
+  } else if (a.type === 'image' || a.type === 'whiteboard') {
     handles = [{ id: 'corner', x: rect.x2, y: rect.y2 }];   // aspect-locked, so only the one handle
   }
   return { a, rect, badge, handles };
@@ -2085,7 +2275,7 @@ function applyTranslatedGeometry(a, orig, dx, dy) {
     case 'curve':
       a.x1 = orig.x1 + dx; a.y1 = orig.y1 + dy; a.x2 = orig.x2 + dx; a.y2 = orig.y2 + dy;
       a.cx = orig.cx + dx; a.cy = orig.cy + dy; break;
-    case 'text': case 'image':
+    case 'text': case 'image': case 'whiteboard':
       a.x = orig.x + dx; a.y = orig.y + dy;
       if (a.type === 'text' && orig.coverRect) {   // keep the erase patch glued to the text it covers
         a.coverRect = { x1: orig.coverRect.x1 + dx, y1: orig.coverRect.y1 + dy, x2: orig.coverRect.x2 + dx, y2: orig.coverRect.y2 + dy };
@@ -2113,7 +2303,7 @@ function duplicateSelectedAnnotation() {
   const off = 14 / App.scale;
   switch (copy.type) {
     case 'pen': case 'highlighter': copy.points = copy.points.map((p) => ({ x: p.x + off, y: p.y + off })); break;
-    case 'text': case 'image':
+    case 'text': case 'image': case 'whiteboard':
       copy.x += off; copy.y += off;
       // A duplicate is a new, independent piece of text — it shouldn't drag along the original's
       // "this patches over real PDF text" whiteout, or it'd leave that patch behind, unmoved.
@@ -2172,6 +2362,15 @@ function handleSelectPointerDown(pageNum, pos) {
         }
         lastTap = { id: sel.a.id, t: now };
       }
+      if (sel.a.type === 'whiteboard') {
+        const now = Date.now();
+        if (lastTap.id === sel.a.id && now - lastTap.t < 380) {   // double-click on placed whiteboard -> open editor!
+          lastTap = { id: null, t: 0 };
+          switchToWhiteboardTab(sel.a.whiteboardId);
+          return false;
+        }
+        lastTap = { id: sel.a.id, t: now };
+      }
       App.selDrag = { mode: 'move', start: toPdfSpace(pos), orig: structuredClone(sel.a), moved: false };
       return true;
     }
@@ -2186,6 +2385,12 @@ function handleSelectPointerDown(pageNum, pos) {
       lastTap = { id: null, t: 0 };
       setSelected({ pageNum, id: a.id });
       openTextEditor(pageNum, null, a);
+      return false;
+    }
+    if (a.type === 'whiteboard' && lastTap.id === a.id && now - lastTap.t < 380) {   // double-click whiteboard -> open editor!
+      lastTap = { id: null, t: 0 };
+      setSelected({ pageNum, id: a.id });
+      switchToWhiteboardTab(a.whiteboardId);
       return false;
     }
     lastTap = { id: a.id, t: now };
@@ -4536,6 +4741,21 @@ function toggleTextScript(kind) {
 // belongs: the open editor if one is active, a selected text annotation, or the app defaults.
 function applyTextStyle(patch) {
   if (activeTextEditor) { activeTextEditor.setStyle(patch); syncTextStyleButtons(); return; }
+  if (App.activeTab === 'whiteboard' && typeof WhiteboardsStore !== 'undefined' && typeof WbApp !== 'undefined') {
+    const wb = WhiteboardsStore.getActive();
+    const sel = (wb && WbApp.selected) ? wb.annotations.find(x => x.id === WbApp.selected) : null;
+    if (sel && sel.type === 'text') {
+      WbApp.pushHistory();
+      applyStyleToWholeTextAnnotation(sel, patch);
+      wbRedraw();
+      wbSaveAndSync();
+    } else {
+      Object.assign(App, patch);
+      scheduleSettingsSave();
+    }
+    syncTextStyleButtons();
+    return;
+  }
   const sel = getSelectedAnnotation();
   if (sel && sel.type === 'text') {
     beginStyleEdit();
@@ -4567,7 +4787,13 @@ function syncTextStyleButtons() {
   });
 }
 function refreshControls() {
-  const sel = getSelectedAnnotation();
+  let sel = null;
+  if (App.activeTab === 'whiteboard' && typeof WhiteboardsStore !== 'undefined' && typeof WbApp !== 'undefined') {
+    const wb = WhiteboardsStore.getActive();
+    sel = (wb && WbApp.selected) ? wb.annotations.find(x => x.id === WbApp.selected) : null;
+  } else {
+    sel = getSelectedAnnotation();
+  }
   // Keep the palette + custom swatch in sync with whatever is actually selected, so the picker
   // never shows a stale colour left over from the last thing you drew.
   const currentColor = activeTextEditor ? activeTextEditor.getStyle().color : (sel && sel.color) ? sel.color : App.color;
@@ -4616,8 +4842,21 @@ function setColor(hex) {
   syncCustomSwatchActive(hex);
   if (activeTextEditor) { App.color = hex; activeTextEditor.setStyle({ color: hex }); scheduleSettingsSave(); return; }
   App.color = hex;
+  if (App.activeTab === 'whiteboard') {
+    const wb = WhiteboardsStore.getActive();
+    if (wb && WbApp.selected) {
+      const a = wb.annotations.find(x => x.id === WbApp.selected);
+      if (a && a.type !== 'image') {
+        WbApp.pushHistory();
+        if (a.type === 'text') applyStyleToWholeTextAnnotation(a, { color: hex }); else a.color = hex;
+        wbRedraw();
+        wbSaveAndSync();
+        return;
+      }
+    }
+  }
   const sel = getSelectedAnnotation();
-  if (sel && sel.type !== 'image') {
+  if (sel && sel.type !== 'image' && sel.type !== 'whiteboard') {
     beginStyleEdit();
     if (sel.type === 'text') applyStyleToWholeTextAnnotation(sel, { color: hex }); else sel.color = hex;
     requestRedraw(App.selected.pageNum);
@@ -4960,8 +5199,10 @@ async function exportProject() {
   if (!App.pdfDoc) { showToast('Open a PDF first.'); return; }
   closeTextEditor(true);
   const payload = {
-    app: 'AcroMark', version: 1, fileName: App.currentFileName || 'document.pdf', numPages: App.numPages,
-    pageAnnotations: App.pageAnnotations, comments: App.comments, exportedAt: new Date().toISOString()
+    app: 'AcroMark', version: 2, fileName: App.currentFileName || 'document.pdf', numPages: App.numPages,
+    pageAnnotations: App.pageAnnotations, comments: App.comments,
+    whiteboards: (typeof WhiteboardsStore !== 'undefined') ? WhiteboardsStore.items : [],
+    exportedAt: new Date().toISOString()
   };
   const baseName = (App.currentFileName || 'annotations').replace(/\.pdf$/i, '');
   const saved = await saveFile(`${baseName}.acromark.json`, new Blob([JSON.stringify(payload)], { type: 'application/json' }));
@@ -4975,6 +5216,9 @@ async function importProject(file) {
     const data = JSON.parse(await file.text());
     if (!data || typeof data !== 'object' || typeof data.pageAnnotations !== 'object' || !data.pageAnnotations) throw new Error('Not a valid AcroMark project file.');
     const clean = sanitizeProject(data, App.numPages);
+    if (data.whiteboards && Array.isArray(data.whiteboards) && typeof WhiteboardsStore !== 'undefined') {
+      WhiteboardsStore.importWhiteboards(data.whiteboards);
+    }
     if (data.numPages && data.numPages !== App.numPages) showToast(`Heads up: this project was saved for ${data.numPages} pages but the open PDF has ${App.numPages}.`, { duration: 6500 });
     applyProject(clean, clean.dropped ? `Project imported (${clean.dropped} item${clean.dropped === 1 ? '' : 's'} skipped).` : 'Project imported.');
   } catch (err) {
@@ -5029,10 +5273,86 @@ const TOOL_ACTION_IDS = new Set(['select', 'hand', 'pen', 'highlighter', 'arrow'
 const KEYBIND_HANDLERS = {
   signature: () => openSignatureModal(),
   eyedrop: () => toggleSampling(),
-  deleteSelected: () => { if (App.selected) deleteSelectedAnnotation(); },
-  duplicate: () => { if (App.selected) duplicateSelectedAnnotation(); },
-  bringFront: () => { if (App.selected) reorderSelectedAnnotation(true); },
-  sendBack: () => { if (App.selected) reorderSelectedAnnotation(false); },
+  deleteSelected: () => {
+    if (App.activeTab === 'whiteboard' && typeof WbApp !== 'undefined') {
+      if (WbApp.selected) {
+        const wb = WhiteboardsStore.getActive();
+        if (wb) {
+          WbApp.pushHistory();
+          wb.annotations = wb.annotations.filter(x => x.id !== WbApp.selected);
+          WbApp.selected = null;
+          wbRedraw();
+          wbSaveAndSync();
+        }
+      }
+    } else {
+      if (App.selected) deleteSelectedAnnotation();
+    }
+  },
+  duplicate: () => {
+    if (App.activeTab === 'whiteboard' && typeof WbApp !== 'undefined') {
+      if (WbApp.selected) {
+        const wb = WhiteboardsStore.getActive();
+        const a = wb && wb.annotations.find(x => x.id === WbApp.selected);
+        if (a) {
+          WbApp.pushHistory();
+          const copy = structuredClone(a);
+          copy.id = genId();
+          const off = 14 / WbApp.scale;
+          switch (copy.type) {
+            case 'pen': case 'highlighter': copy.points = copy.points.map(p => ({ x: p.x + off, y: p.y + off })); break;
+            case 'text': case 'image': copy.x += off; copy.y += off; break;
+            case 'curve': copy.x1 += off; copy.y1 += off; copy.x2 += off; copy.y2 += off; copy.cx += off; copy.cy += off; break;
+            default: copy.x1 += off; copy.y1 += off; copy.x2 += off; copy.y2 += off;
+          }
+          wb.annotations.push(copy);
+          WbApp.selected = copy.id;
+          wbRedraw();
+          wbSaveAndSync();
+        }
+      }
+    } else {
+      if (App.selected) duplicateSelectedAnnotation();
+    }
+  },
+  bringFront: () => {
+    if (App.activeTab === 'whiteboard' && typeof WbApp !== 'undefined') {
+      if (WbApp.selected) {
+        const wb = WhiteboardsStore.getActive();
+        if (wb) {
+          const idx = wb.annotations.findIndex(x => x.id === WbApp.selected);
+          if (idx !== -1 && idx < wb.annotations.length - 1) {
+            WbApp.pushHistory();
+            const [a] = wb.annotations.splice(idx, 1);
+            wb.annotations.push(a);
+            wbRedraw();
+            wbSaveAndSync();
+          }
+        }
+      }
+    } else {
+      if (App.selected) reorderSelectedAnnotation(true);
+    }
+  },
+  sendBack: () => {
+    if (App.activeTab === 'whiteboard' && typeof WbApp !== 'undefined') {
+      if (WbApp.selected) {
+        const wb = WhiteboardsStore.getActive();
+        if (wb) {
+          const idx = wb.annotations.findIndex(x => x.id === WbApp.selected);
+          if (idx > 0) {
+            WbApp.pushHistory();
+            const [a] = wb.annotations.splice(idx, 1);
+            wb.annotations.unshift(a);
+            wbRedraw();
+            wbSaveAndSync();
+          }
+        }
+      }
+    } else {
+      if (App.selected) reorderSelectedAnnotation(false);
+    }
+  },
   undo: () => undo(),
   redo: () => redo(),
   exportPdf: () => exportAnnotatedPdf(),
@@ -5203,11 +5523,25 @@ window.addEventListener('keydown', (e) => {
   if (key === 'enter' && App.selected) {
     const a = getSelectedAnnotation();
     if (a && a.type === 'text') { e.preventDefault(); openTextEditor(App.selected.pageNum, null, a); return; }
+    if (a && a.type === 'whiteboard') { e.preventDefault(); switchToWhiteboardTab(a.whiteboardId); return; }
   }
-  if (App.selected && key.startsWith('arrow')) {
+  if ((App.selected || (App.activeTab === 'whiteboard' && WbApp.selected)) && key.startsWith('arrow')) {
     e.preventDefault();
     const step = e.shiftKey ? 10 : 1;
-    nudgeSelected(key === 'arrowleft' ? -step : key === 'arrowright' ? step : 0, key === 'arrowup' ? -step : key === 'arrowdown' ? step : 0);
+    const dx = key === 'arrowleft' ? -step : key === 'arrowright' ? step : 0;
+    const dy = key === 'arrowup' ? -step : key === 'arrowdown' ? step : 0;
+    if (App.activeTab === 'whiteboard') {
+      const wb = WhiteboardsStore.getActive();
+      const a = wb && wb.annotations.find(x => x.id === WbApp.selected);
+      if (a) {
+        WbApp.pushHistory();
+        applyTranslatedGeometry(a, structuredClone(a), dx, dy);
+        wbRedraw();
+        wbSaveAndSync();
+      }
+    } else {
+      nudgeSelected(dx, dy);
+    }
     return;
   }
   if (key === '+') { stepZoom(1); return; }
@@ -5270,9 +5604,17 @@ annotContextMenu.addEventListener('click', (e) => {
   e.stopPropagation();
   const btn = e.target.closest('button[data-action]');
   if (!btn || !contextMenuTarget) return;
+  const action = btn.dataset.action;
+  if (contextMenuTarget.isWhiteboard) {
+    if (action === 'duplicate') KEYBIND_HANDLERS.duplicate();
+    else if (action === 'front') KEYBIND_HANDLERS.bringFront();
+    else if (action === 'back') KEYBIND_HANDLERS.sendBack();
+    else if (action === 'delete') KEYBIND_HANDLERS.deleteSelected();
+    closeContextMenu();
+    return;
+  }
   const { pageNum, id } = contextMenuTarget;
   if (!App.selected || App.selected.pageNum !== pageNum || App.selected.id !== id) setSelected({ pageNum, id });
-  const action = btn.dataset.action;
   if (action === 'duplicate') duplicateSelectedAnnotation();
   else if (action === 'front') reorderSelectedAnnotation(true);
   else if (action === 'back') reorderSelectedAnnotation(false);
@@ -5330,8 +5672,25 @@ document.querySelectorAll('#textStyleControls [data-text-align]').forEach((btn) 
 // exactly like typing a size into Google Slides' box while a mixed selection is active.
 function applySizeValue(v) {
   if (activeTextEditor) { App.fontSize = v; activeTextEditor.setStyle({ fontSize: v }); return; }
+  if (App.activeTab === 'whiteboard') {
+    const wb = WhiteboardsStore.getActive();
+    if (wb && WbApp.selected) {
+      const a = wb.annotations.find(x => x.id === WbApp.selected);
+      if (a && a.type !== 'image') {
+        WbApp.pushHistory();
+        if (a.type === 'text') applyStyleToWholeTextAnnotation(a, { fontSize: v }); else a.width = v;
+        wbRedraw();
+        wbSaveAndSync();
+        return;
+      }
+    }
+    if (App.activeTool === 'text') App.fontSize = v;
+    else if (App.activeTool === 'highlighter') App.highlighterWidth = v;
+    else App.strokeWidth = v;
+    return;
+  }
   const sel = getSelectedAnnotation();
-  if (sel && sel.type !== 'image') {
+  if (sel && sel.type !== 'image' && sel.type !== 'whiteboard') {
     beginStyleEdit();
     if (sel.type === 'text') applyStyleToWholeTextAnnotation(sel, { fontSize: v }); else sel.width = v;
     requestRedraw(App.selected.pageNum); scheduleAutosave();
@@ -5423,6 +5782,19 @@ $('btnLandingSample').addEventListener('click', loadSampleDocument);
 $('btnLandingOpen').addEventListener('click', () => fileInputEl.click());
 
 $('btnClearPage').addEventListener('click', async () => {
+  if (App.activeTab === 'whiteboard') {
+    const wb = WhiteboardsStore.getActive();
+    if (!wb || !wb.annotations.length) { showToast('This whiteboard has no marks to clear.'); return; }
+    const ok = await openConfirm({ title: 'Clear this whiteboard?', message: 'All drawings on this whiteboard will be removed. You can still undo with Ctrl+Z.', confirmLabel: 'Clear whiteboard' });
+    if (!ok) return;
+    WbApp.pushHistory();
+    wb.annotations = [];
+    WbApp.selected = null;
+    wbRedraw();
+    wbSaveAndSync();
+    showToast('Whiteboard cleared.');
+    return;
+  }
   const n = App.activePage, list = App.pageAnnotations[n];
   if (!list || !list.length) { showToast('This page has no marks to clear.'); return; }
   const ok = await openConfirm({ title: 'Clear this page?', message: 'Every mark on this page will be removed. You can still undo with Ctrl+Z.', confirmLabel: 'Clear page' });
@@ -5433,8 +5805,12 @@ $('btnClearPage').addEventListener('click', async () => {
   requestRedraw(n);
   scheduleAutosave();
 });
-btnUndo.addEventListener('click', undo);
-btnRedo.addEventListener('click', redo);
+btnUndo.addEventListener('click', () => {
+  if (App.activeTab === 'whiteboard') WbApp.undo(); else undo();
+});
+btnRedo.addEventListener('click', () => {
+  if (App.activeTab === 'whiteboard') WbApp.redo(); else redo();
+});
 $('btnConvertPageText').addEventListener('click', async () => {
   if (!App.pdfDoc) { showToast('Open a PDF first.'); return; }
   const btn = $('btnConvertPageText');
@@ -5631,6 +6007,1134 @@ window.addEventListener('storage', (e) => {
   if (THEME_IDS.includes(t) && t !== App.theme) applyTheme(t, { save: false });
 });
 
+
+// =======================================================================
+// WHITEBOARDS SYSTEM: STORE, CONTROLLER & LIVE PDF SYNC
+// =======================================================================
+const WB_STORAGE_KEY = 'acromark:whiteboards:v2';
+const WB_DOC_WIDTH = 1400;
+const WB_DOC_HEIGHT = 900;
+
+const WhiteboardsStore = {
+  items: [],
+  activeId: null,
+
+  init() {
+    this.load();
+    if (!this.items.length) {
+      this.create('Whiteboard 1', false);
+    }
+    if (!this.activeId || !this.get(this.activeId)) {
+      this.activeId = this.items[0].id;
+    }
+  },
+
+  load() {
+    try {
+      const raw = localStorage.getItem(WB_STORAGE_KEY);
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      if (Array.isArray(data.items)) {
+        this.items = data.items.map(wb => ({
+          id: String(wb.id || genId()),
+          name: String(wb.name || 'Untitled Whiteboard').slice(0, 50),
+          width: isNum(wb.width) && wb.width > 100 ? wb.width : WB_DOC_WIDTH,
+          height: isNum(wb.height) && wb.height > 100 ? wb.height : WB_DOC_HEIGHT,
+          annotations: Array.isArray(wb.annotations) ? wb.annotations.map(sanitizeAnnotation).filter(Boolean) : [],
+          thumbnailDataUrl: typeof wb.thumbnailDataUrl === 'string' ? wb.thumbnailDataUrl : '',
+          createdAt: isNum(wb.createdAt) ? wb.createdAt : Date.now(),
+          updatedAt: isNum(wb.updatedAt) ? wb.updatedAt : Date.now()
+        }));
+        this.activeId = data.activeId || (this.items[0] && this.items[0].id);
+      }
+    } catch (e) {
+      console.warn('Could not load whiteboards', e);
+      this.items = [];
+    }
+  },
+
+  save() {
+    try {
+      localStorage.setItem(WB_STORAGE_KEY, JSON.stringify({
+        activeId: this.activeId,
+        items: this.items
+      }));
+    } catch (e) {
+      console.warn('Could not save whiteboards to localStorage', e);
+    }
+    updateWhiteboardsUI();
+  },
+
+  get(id) {
+    return this.items.find(w => w.id === id);
+  },
+
+  getActive() {
+    return this.get(this.activeId) || this.items[0];
+  },
+
+  create(name, autoSelect = true) {
+    const num = this.items.length + 1;
+    const wb = {
+      id: 'wb_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6),
+      name: name || `Whiteboard ${num}`,
+      width: WB_DOC_WIDTH,
+      height: WB_DOC_HEIGHT,
+      annotations: [],
+      thumbnailDataUrl: '',
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    this.renderThumbnail(wb);
+    this.items.push(wb);
+    if (autoSelect) {
+      this.activeId = wb.id;
+    }
+    this.save();
+    return wb;
+  },
+
+  duplicate(id) {
+    const src = this.get(id);
+    if (!src) return null;
+    const wb = {
+      id: 'wb_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6),
+      name: `${src.name} (Copy)`,
+      width: src.width,
+      height: src.height,
+      annotations: structuredClone(src.annotations).map(a => ({ ...a, id: genId() })),
+      thumbnailDataUrl: src.thumbnailDataUrl,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    this.renderThumbnail(wb);
+    this.items.push(wb);
+    this.activeId = wb.id;
+    this.save();
+    return wb;
+  },
+
+  remove(id) {
+    if (this.items.length <= 1) {
+      const curr = this.items[0];
+      curr.name = 'Whiteboard 1';
+      curr.annotations = [];
+      curr.updatedAt = Date.now();
+      this.renderThumbnail(curr);
+      this.save();
+      return;
+    }
+    const idx = this.items.findIndex(w => w.id === id);
+    if (idx !== -1) {
+      this.items.splice(idx, 1);
+      if (this.activeId === id) {
+        this.activeId = this.items[Math.max(0, idx - 1)].id;
+      }
+      this.save();
+    }
+  },
+
+  rename(id, newName) {
+    const wb = this.get(id);
+    if (!wb) return;
+    wb.name = (newName || 'Untitled').trim().slice(0, 50) || 'Untitled Whiteboard';
+    wb.updatedAt = Date.now();
+    this.save();
+  },
+
+  renderThumbnail(wb) {
+    const cw = 560, ch = Math.round(cw * (wb.height / wb.width));
+    const offCanvas = document.createElement('canvas');
+    offCanvas.width = cw;
+    offCanvas.height = ch;
+    const ctx = offCanvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, cw, ch);
+    const s = cw / wb.width;
+    for (const a of wb.annotations || []) {
+      try {
+        drawAnnotation(ctx, a, s, 0);
+      } catch (err) { /* ignore */ }
+    }
+    wb.thumbnailDataUrl = offCanvas.toDataURL('image/png');
+    return wb.thumbnailDataUrl;
+  },
+
+  importWhiteboards(imported) {
+    if (!Array.isArray(imported) || !imported.length) return;
+    let added = 0;
+    for (const raw of imported) {
+      if (!raw || typeof raw !== 'object') continue;
+      const id = String(raw.id || genId());
+      const existing = this.get(id);
+      const annots = Array.isArray(raw.annotations) ? raw.annotations.map(sanitizeAnnotation).filter(Boolean) : [];
+      if (existing) {
+        existing.annotations = annots;
+        existing.name = String(raw.name || existing.name);
+        this.renderThumbnail(existing);
+      } else {
+        const wb = {
+          id,
+          name: String(raw.name || 'Whiteboard').slice(0, 50),
+          width: isNum(raw.width) && raw.width > 100 ? raw.width : WB_DOC_WIDTH,
+          height: isNum(raw.height) && raw.height > 100 ? raw.height : WB_DOC_HEIGHT,
+          annotations: annots,
+          thumbnailDataUrl: '',
+          createdAt: isNum(raw.createdAt) ? raw.createdAt : Date.now(),
+          updatedAt: Date.now()
+        };
+        this.renderThumbnail(wb);
+        this.items.push(wb);
+        added++;
+      }
+    }
+    this.save();
+    return added;
+  }
+};
+
+// Live synchronization from Whiteboard Editor into PDF document pages!
+function syncPlacedWhiteboards(wbId) {
+  const wb = WhiteboardsStore.get(wbId);
+  if (!wb) return;
+  delete App.whiteboardImageCache[wbId];
+  const affectedPages = new Set();
+  for (const [pageNum, list] of Object.entries(App.pageAnnotations)) {
+    for (const a of list) {
+      if (a.type === 'whiteboard' && a.whiteboardId === wbId) {
+        a.dataUrl = wb.thumbnailDataUrl;
+        delete App.whiteboardImageCache[a.id];
+        affectedPages.add(+pageNum);
+      }
+    }
+  }
+  affectedPages.forEach(p => requestRedraw(p));
+  updateWhiteboardsUI();
+}
+
+// =======================================================================
+// WHITEBOARD CANVAS CONTROLLER (WbApp)
+// =======================================================================
+const WbApp = {
+  scale: 0.85,
+  minScale: 0.25,
+  maxScale: 3.0,
+  selected: null, // string id
+  selDrag: null,
+  hover: null,
+  gesture: null,
+  history: [],
+  future: [],
+  editingAnnotation: null,
+
+  pushHistory() {
+    const wb = WhiteboardsStore.getActive();
+    if (!wb) return;
+    this.history.push(structuredClone(wb.annotations));
+    if (this.history.length > 50) this.history.shift();
+    this.future = [];
+    updateHistoryButtons();
+  },
+
+  undo() {
+    closeWbTextEditor(true);
+    if (!this.history.length) return;
+    const wb = WhiteboardsStore.getActive();
+    if (!wb) return;
+    this.future.push(structuredClone(wb.annotations));
+    wb.annotations = this.history.pop();
+    this.selected = null;
+    this.selDrag = null;
+    wbRedraw();
+    wbSaveAndSync();
+    updateHistoryButtons();
+  },
+
+  redo() {
+    closeWbTextEditor(true);
+    if (!this.future.length) return;
+    const wb = WhiteboardsStore.getActive();
+    if (!wb) return;
+    this.history.push(structuredClone(wb.annotations));
+    wb.annotations = this.future.pop();
+    this.selected = null;
+    this.selDrag = null;
+    wbRedraw();
+    wbSaveAndSync();
+    updateHistoryButtons();
+  },
+
+  resetHistory() {
+    this.history = [];
+    this.future = [];
+    updateHistoryButtons();
+  },
+
+  setScale(s) {
+    this.scale = +clamp(s, this.minScale, this.maxScale).toFixed(2);
+    const wrap = $('wbBoardWrap');
+    const canvas = $('wbCanvas');
+    const wb = WhiteboardsStore.getActive();
+    if (!wrap || !canvas || !wb) return;
+    const cssW = Math.round(wb.width * this.scale);
+    const cssH = Math.round(wb.height * this.scale);
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    wrap.style.width = cssW + 'px';
+    wrap.style.height = cssH + 'px';
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
+    canvas._dpr = dpr;
+    $('wbZoomLabel').textContent = Math.round(this.scale * 100) + '%';
+    wbRedraw();
+  }
+};
+
+function wbSaveAndSync() {
+  const wb = WhiteboardsStore.getActive();
+  if (!wb) return;
+  wb.updatedAt = Date.now();
+  WhiteboardsStore.renderThumbnail(wb);
+  WhiteboardsStore.save();
+  syncPlacedWhiteboards(wb.id);
+  const ind = $('wbAutosaveIndicator');
+  if (ind) {
+    ind.innerHTML = '<i data-lucide="check" class="w-3.5 h-3.5 text-emerald-500"></i><span>Saved</span>';
+    renderIcons();
+  }
+}
+
+function toWbSpace(pos) {
+  return { x: pos.x / WbApp.scale, y: pos.y / WbApp.scale };
+}
+function toWbCanvasSpace(p) {
+  return { x: p.x * WbApp.scale, y: p.y * WbApp.scale };
+}
+
+function getWbSelectionGeometry() {
+  if (!WbApp.selected) return null;
+  const wb = WhiteboardsStore.getActive();
+  if (!wb) return null;
+  const a = wb.annotations.find(x => x.id === WbApp.selected);
+  if (!a) return null;
+  const bb = getAnnotationBBox(a);
+  const p1 = toWbCanvasSpace({ x: bb.x1, y: bb.y1 });
+  const p2 = toWbCanvasSpace({ x: bb.x2, y: bb.y2 });
+  const rect = { x1: Math.min(p1.x, p2.x), y1: Math.min(p1.y, p2.y), x2: Math.max(p1.x, p2.x), y2: Math.max(p1.y, p2.y) };
+  const boardW = wb.width * WbApp.scale, boardH = wb.height * WbApp.scale;
+  const badge = { cx: clamp(rect.x2, 12, boardW - 12), cy: clamp(rect.y1, 12, boardH - 12), r: 10 };
+  let handles = [];
+  if (a.type === 'curve') {
+    const h1 = toWbCanvasSpace({ x: a.x1, y: a.y1 }), h2 = toWbCanvasSpace({ x: a.x2, y: a.y2 }), h3 = toWbCanvasSpace({ x: a.cx, y: a.cy });
+    handles = [{ id: 'p1', x: h1.x, y: h1.y }, { id: 'p2', x: h2.x, y: h2.y }, { id: 'p3', x: h3.x, y: h3.y }];
+  } else if (DIRECTIONAL_SHAPE_TYPES.has(a.type) || BOX_SHAPE_TYPES.has(a.type)) {
+    const h1 = toWbCanvasSpace({ x: a.x1, y: a.y1 }), h2 = toWbCanvasSpace({ x: a.x2, y: a.y2 });
+    handles = [{ id: 'p1', x: h1.x, y: h1.y }, { id: 'p2', x: h2.x, y: h2.y }];
+  } else if (a.type === 'image') {
+    handles = [{ id: 'corner', x: rect.x2, y: rect.y2 }];
+  }
+  return { a, rect, badge, handles };
+}
+
+function drawWbSelectionOverlay(ctx, sel) {
+  drawSelectionOverlay(ctx, sel);
+}
+function drawWbHoverOutline(ctx, a) {
+  const bb = getAnnotationBBox(a);
+  const p1 = toWbCanvasSpace({ x: bb.x1, y: bb.y1 }), p2 = toWbCanvasSpace({ x: bb.x2, y: bb.y2 });
+  ctx.save();
+  ctx.strokeStyle = 'rgba(211, 146, 60, 0.55)';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(Math.min(p1.x, p2.x), Math.min(p1.y, p2.y), Math.abs(p2.x - p1.x), Math.abs(p2.y - p1.y));
+  ctx.restore();
+}
+
+function wbRedraw() {
+  const wb = WhiteboardsStore.getActive();
+  if (!wb) return;
+  const c = $('wbCanvas');
+  if (!c) return;
+  const ctx = c.getContext('2d');
+  const dpr = c._dpr || 1;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, c.width, c.height);
+
+  // Subtle dotted grid
+  ctx.save();
+  const dotSpacing = 28 * WbApp.scale * dpr;
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.05)';
+  for (let x = dotSpacing; x < c.width; x += dotSpacing) {
+    for (let y = dotSpacing; y < c.height; y += dotSpacing) {
+      ctx.fillRect(x - 1, y - 1, 2, 2);
+    }
+  }
+  ctx.restore();
+
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  for (const a of wb.annotations || []) {
+    try {
+      if (WbApp.editingAnnotation && WbApp.editingAnnotation === a.id) continue;
+      drawAnnotation(ctx, a, WbApp.scale, 0);
+    } catch (err) { console.warn('Wb draw error', err); }
+  }
+
+  const g = WbApp.gesture;
+  if (g && g.kind === 'draw') {
+    drawAnnotation(ctx, g.shape, WbApp.scale, 0);
+  }
+
+  if (WbApp.hover) {
+    const h = wb.annotations.find(x => x.id === WbApp.hover);
+    if (h) drawWbHoverOutline(ctx, h);
+  }
+
+  const sel = getWbSelectionGeometry();
+  if (sel && !WbApp.editingAnnotation) {
+    drawWbSelectionOverlay(ctx, sel);
+  }
+}
+
+function fitWhiteboardToViewport() {
+  const vp = $('wbViewport');
+  if (!vp) return;
+  const vpW = vp.clientWidth - 48;
+  const vpH = vp.clientHeight - 48;
+  const wb = WhiteboardsStore.getActive();
+  const w = wb ? wb.width : WB_DOC_WIDTH;
+  const h = wb ? wb.height : WB_DOC_HEIGHT;
+  const s = Math.min(vpW / w, vpH / h, 1.2);
+  WbApp.setScale(clamp(s, 0.25, 2.5));
+}
+
+// Inline Text Editor for Whiteboard
+let activeWbTextEditor = null;
+function closeWbTextEditor(commit) {
+  if (activeWbTextEditor) activeWbTextEditor.finish(commit);
+}
+
+function openWbTextEditor(pos, existing) {
+  closeWbTextEditor(true);
+  const wrap = $('wbBoardWrap');
+  const wb = WhiteboardsStore.getActive();
+  if (!wrap || !wb) return;
+  const at = existing ? { x: existing.x, y: existing.y } : pos;
+  if (existing) {
+    WbApp.editingAnnotation = existing.id;
+    wbRedraw();
+  }
+
+  const runSource = existing ? existing : {
+    text: '', color: App.color, fontSize: App.fontSize, fontFamily: App.fontFamily,
+    bold: App.bold, italic: App.italic, underline: App.underline, superscript: App.superscript, subscript: App.subscript
+  };
+  let runs = runsFromAnnotation(runSource).map(r => ({ ...r }));
+  let align = existing ? (existing.align || 'left') : App.align;
+  let lineHeight = existing ? lineHeightOf(existing) : clampLineHeight(App.lineHeight);
+
+  const editorEl = document.createElement('div');
+  editorEl.className = 'text-editor';
+  editorEl.contentEditable = 'true';
+  editorEl.spellcheck = false;
+  editorEl.style.left = `${at.x * WbApp.scale}px`;
+  editorEl.style.lineHeight = String(lineHeight);
+
+  function renderRuns() {
+    editorEl.innerHTML = '';
+    for (const r of runs) {
+      if (!r.text) continue;
+      const span = document.createElement('span');
+      const px = scriptFontSize(r) * WbApp.scale;
+      span.style.fontFamily = textFontCss(r);
+      span.style.fontWeight = r.bold ? '700' : '400';
+      span.style.fontStyle = r.italic ? 'italic' : 'normal';
+      span.style.textDecoration = r.underline ? 'underline' : 'none';
+      span.style.color = r.color;
+      span.style.fontSize = `${px}px`;
+      span.style.verticalAlign = r.superscript ? 'super' : r.subscript ? 'sub' : 'baseline';
+      span.textContent = r.text;
+      editorEl.appendChild(span);
+    }
+    if (textFromRuns(runs).endsWith('\n')) {
+      const br = document.createElement('br');
+      br.dataset.trailing = '1';
+      editorEl.appendChild(br);
+    }
+  }
+
+  function fit() {
+    const lines = runsToLines(runs);
+    let maxW = 0;
+    lines.forEach(pieces => {
+      let w = 0;
+      pieces.forEach(p => {
+        measureCtx.font = canvasFontString(p, scriptFontSize(p) * WbApp.scale);
+        w += p.text ? measureCtx.measureText(p.text).width : 0;
+      });
+      maxW = Math.max(maxW, w);
+    });
+    const first = runs[0] || { fontSize: App.fontSize, superscript: false, subscript: false };
+    const fontPx = scriptFontSize(first) * WbApp.scale;
+    const shiftPx = scriptBaselineShift(first) * WbApp.scale;
+    editorEl.style.fontFamily = textFontCss(first);
+    editorEl.style.fontWeight = first.bold ? '700' : '400';
+    editorEl.style.fontStyle = first.italic ? 'italic' : 'normal';
+    editorEl.style.color = first.color || App.color;
+    editorEl.style.fontSize = `${fontPx}px`;
+    editorEl.style.textAlign = align;
+    editorEl.style.lineHeight = String(lineHeight);
+    editorEl.style.top = `${at.y * WbApp.scale + shiftPx - fontPx * (0.97 + (lineHeight - LINE_H) / 2)}px`;
+    editorEl.style.width = `${Math.max(40, maxW + 6)}px`;
+  }
+
+  renderRuns();
+  fit();
+  wrap.appendChild(editorEl);
+  requestAnimationFrame(() => {
+    editorEl.focus();
+    const range = document.createRange();
+    range.selectNodeContents(editorEl);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  });
+
+  let done = false;
+  const api = {
+    finish(commit) {
+      if (done) return;
+      done = true;
+      activeWbTextEditor = null;
+      editorEl.remove();
+      if (existing) {
+        WbApp.editingAnnotation = null;
+      }
+      if (!commit) {
+        wbRedraw();
+        return;
+      }
+      const val = editorEl.textContent.replace(/\s+$/, '');
+      if (existing) {
+        if (!val.trim()) {
+          WbApp.pushHistory();
+          wb.annotations = wb.annotations.filter(x => x.id !== existing.id);
+          if (WbApp.selected === existing.id) WbApp.selected = null;
+        } else {
+          WbApp.pushHistory();
+          existing.text = val;
+          existing.runs = normalizeRuns(runs);
+          existing.align = align;
+          existing.lineHeight = lineHeight;
+          syncFlatStyleFromRuns(existing, existing.runs);
+        }
+      } else {
+        if (val.trim()) {
+          WbApp.pushHistory();
+          const created = {
+            id: genId(), type: 'text', text: val, runs: normalizeRuns(runs),
+            align, lineHeight, x: at.x, y: at.y
+          };
+          syncFlatStyleFromRuns(created, created.runs);
+          wb.annotations.push(created);
+        }
+      }
+      wbRedraw();
+      wbSaveAndSync();
+    }
+  };
+  activeWbTextEditor = api;
+
+  editorEl.addEventListener('input', () => {
+    runs = [{ text: editorEl.textContent, color: App.color, fontSize: App.fontSize, fontFamily: App.fontFamily, bold: App.bold, italic: App.italic, underline: App.underline, superscript: App.superscript, subscript: App.subscript }];
+    fit();
+  });
+  editorEl.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      api.finish(true);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      api.finish(false);
+    }
+  });
+  editorEl.addEventListener('blur', () => {
+    if (done) return;
+    api.finish(true);
+  });
+}
+
+// Whiteboard Pointer Events
+let wbLastTap = { id: null, t: 0 };
+function initWhiteboardPointerEvents() {
+  const canvas = $('wbCanvas');
+  const wrap = $('wbBoardWrap');
+  if (!canvas || !wrap) return;
+
+  function getPos(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    if (App.activeTab !== 'whiteboard') return;
+    const isMiddleClick = e.pointerType === 'mouse' && e.button === 1;
+    if (e.pointerType === 'mouse' && e.button !== 0 && !isMiddleClick) return;
+    if (WbApp.gesture) return;
+    const pos = getPos(e);
+    const p = toWbSpace(pos);
+    const tool = effectiveTool();
+    const wb = WhiteboardsStore.getActive();
+    if (!wb) return;
+
+    if (App.sampling) {
+      const px = Math.min(canvas.width - 1, Math.max(0, Math.floor(pos.x * (canvas._dpr || 1))));
+      const py = Math.min(canvas.height - 1, Math.max(0, Math.floor(pos.y * (canvas._dpr || 1))));
+      try {
+        const d = canvas.getContext('2d').getImageData(px, py, 1, 1).data;
+        const hex = '#' + [d[0], d[1], d[2]].map(v => v.toString(16).padStart(2, '0')).join('');
+        setCustomColorPickerValue(hex);
+        setColor(hex);
+        showToast(`Picked ${hex.toUpperCase()}`);
+      } catch (err) { /* ignore */ }
+      toggleSampling(false);
+      e.preventDefault();
+      return;
+    }
+
+    const begin = (kind, extra = {}) => {
+      WbApp.gesture = { kind, pointerId: e.pointerId, ...extra };
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+    };
+    if (tool !== 'text') closeWbTextEditor(true);
+
+    if (isMiddleClick || tool === 'hand') {
+      if (e.pointerType === 'touch') return;
+      document.body.classList.add('panning');
+      begin('pan', { sx: e.clientX, sy: e.clientY, sl: $('wbViewport').scrollLeft, st: $('wbViewport').scrollTop });
+    } else if (tool === 'select') {
+      const sel = getWbSelectionGeometry();
+      if (sel) {
+        if (dist(pos, { x: sel.badge.cx, y: sel.badge.cy }) <= sel.badge.r + 6) {
+          WbApp.pushHistory();
+          wb.annotations = wb.annotations.filter(x => x.id !== sel.a.id);
+          WbApp.selected = null;
+          wbRedraw();
+          wbSaveAndSync();
+          return;
+        }
+        for (const h of sel.handles) {
+          if (dist(pos, h) <= 13) {
+            WbApp.selDrag = { mode: 'resize-' + h.id, start: p, orig: structuredClone(sel.a), moved: false };
+            begin('select');
+            return;
+          }
+        }
+        if (pos.x >= sel.rect.x1 - 6 && pos.x <= sel.rect.x2 + 6 && pos.y >= sel.rect.y1 - 6 && pos.y <= sel.rect.y2 + 6) {
+          if (sel.a.type === 'text') {
+            const now = Date.now();
+            if (wbLastTap.id === sel.a.id && now - wbLastTap.t < 380) {
+              wbLastTap = { id: null, t: 0 };
+              openWbTextEditor(null, sel.a);
+              return;
+            }
+            wbLastTap = { id: sel.a.id, t: now };
+          }
+          WbApp.selDrag = { mode: 'move', start: p, orig: structuredClone(sel.a), moved: false };
+          begin('select');
+          return;
+        }
+      }
+      for (let i = wb.annotations.length - 1; i >= 0; i--) {
+        const a = wb.annotations[i];
+        if (hitTestAnnotation(a, p, WbApp.scale)) {
+          const now = Date.now();
+          if (a.type === 'text' && wbLastTap.id === a.id && now - wbLastTap.t < 380) {
+            wbLastTap = { id: null, t: 0 };
+            WbApp.selected = a.id;
+            openWbTextEditor(null, a);
+            return;
+          }
+          wbLastTap = { id: a.id, t: now };
+          WbApp.selected = a.id;
+          WbApp.selDrag = { mode: 'move', start: p, orig: structuredClone(a), moved: false };
+          begin('select');
+          wbRedraw();
+          return;
+        }
+      }
+      if (WbApp.selected) {
+        WbApp.selected = null;
+        wbRedraw();
+      }
+    } else if (tool === 'pen' || tool === 'highlighter') {
+      begin('draw', {
+        shape: {
+          id: genId(), type: tool, points: [p], color: App.color,
+          width: tool === 'highlighter' ? App.highlighterWidth : App.strokeWidth,
+          opacity: tool === 'highlighter' ? App.highlighterOpacity : 1
+        }
+      });
+    } else if (SHAPE_TOOLS.includes(tool)) {
+      const shape = { id: genId(), type: tool, x1: p.x, y1: p.y, x2: p.x, y2: p.y, color: App.color, width: App.strokeWidth };
+      if (tool === 'curve') { shape.cx = p.x; shape.cy = p.y; }
+      begin('draw', { shape });
+    } else if (tool === 'text') {
+      openWbTextEditor(p, null);
+    } else if (tool === 'eraser') {
+      begin('erase', { pushed: false });
+      wbEraseAt(p, WbApp.gesture);
+    }
+    e.preventDefault();
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    if (App.activeTab !== 'whiteboard') return;
+    const g = WbApp.gesture;
+    const pos = getPos(e);
+    const p = toWbSpace(pos);
+    const wb = WhiteboardsStore.getActive();
+    if (!wb) return;
+
+    if (!g) {
+      let cursor = 'crosshair';
+      const tool = effectiveTool();
+      if (tool === 'select') {
+        const sel = getWbSelectionGeometry();
+        cursor = 'default';
+        if (sel) {
+          if (dist(pos, { x: sel.badge.cx, y: sel.badge.cy }) <= sel.badge.r + 6) cursor = 'pointer';
+          for (const h of sel.handles) { if (dist(pos, h) <= 13) cursor = handleCursor(sel, h); }
+          if (pos.x >= sel.rect.x1 - 6 && pos.x <= sel.rect.x2 + 6 && pos.y >= sel.rect.y1 - 6 && pos.y <= sel.rect.y2 + 6) cursor = 'move';
+        }
+        let hoverId = null;
+        for (let i = wb.annotations.length - 1; i >= 0; i--) {
+          if (hitTestAnnotation(wb.annotations[i], p, WbApp.scale)) {
+            cursor = 'pointer';
+            hoverId = wb.annotations[i].id;
+            break;
+          }
+        }
+        if (WbApp.hover !== hoverId) {
+          WbApp.hover = hoverId;
+          wbRedraw();
+        }
+      } else if (tool === 'hand') cursor = 'grab';
+      else if (tool === 'eraser') cursor = 'cell';
+      else if (tool === 'text') cursor = 'text';
+      canvas.style.cursor = cursor;
+      return;
+    }
+
+    if (e.pointerId !== g.pointerId) return;
+
+    if (g.kind === 'pan') {
+      const vp = $('wbViewport');
+      vp.scrollLeft = g.sl - (e.clientX - g.sx);
+      vp.scrollTop = g.st - (e.clientY - g.sy);
+    } else if (g.kind === 'select') {
+      const d = WbApp.selDrag;
+      if (!d || !WbApp.selected) return;
+      const a = wb.annotations.find(x => x.id === WbApp.selected);
+      if (!a) return;
+      if (!d.moved) {
+        if (Math.hypot(p.x - d.start.x, p.y - d.start.y) * WbApp.scale < 2.5) return;
+        WbApp.pushHistory();
+        d.moved = true;
+      }
+      if (d.mode === 'move') {
+        applyTranslatedGeometry(a, d.orig, p.x - d.start.x, p.y - d.start.y);
+      } else if (d.mode === 'resize-corner') {
+        a.width = Math.max(16, p.x - a.x);
+        a.height = a.width * (d.orig.height / d.orig.width);
+      } else if (d.mode === 'resize-p1') { a.x1 = p.x; a.y1 = p.y; }
+      else if (d.mode === 'resize-p2') { a.x2 = p.x; a.y2 = p.y; }
+      else if (d.mode === 'resize-p3') { a.cx = p.x; a.cy = p.y; }
+      wbRedraw();
+    } else if (g.kind === 'erase') {
+      wbEraseAt(p, g);
+    } else if (g.kind === 'draw') {
+      const s = g.shape;
+      if (s.type === 'pen' || s.type === 'highlighter') {
+        const last = s.points[s.points.length - 1];
+        if (dist(p, last) * WbApp.scale >= 0.8) s.points.push(p);
+      } else {
+        s.x2 = p.x; s.y2 = p.y;
+        if (e.shiftKey) constrainShape(s);
+        if (s.type === 'curve') { s.cx = (s.x1 + s.x2) / 2; s.cy = (s.y1 + s.y2) / 2; }
+      }
+      wbRedraw();
+    }
+  });
+
+  const onUp = (e) => {
+    if (App.activeTab !== 'whiteboard') return;
+    const g = WbApp.gesture;
+    if (!g || e.pointerId !== g.pointerId) return;
+    WbApp.gesture = null;
+    document.body.classList.remove('panning');
+    const wb = WhiteboardsStore.getActive();
+    if (!wb) return;
+
+    if (g.kind === 'select') {
+      const d = WbApp.selDrag;
+      WbApp.selDrag = null;
+      if (d && d.moved) {
+        const a = wb.annotations.find(x => x.id === WbApp.selected);
+        if (a) normalizeBox(a);
+        wbRedraw();
+        wbSaveAndSync();
+      }
+    } else if (g.kind === 'draw') {
+      const s = g.shape;
+      const trivial = (s.type === 'pen' || s.type === 'highlighter') ? s.points.length < 2 : (s.x1 === s.x2 && s.y1 === s.y2);
+      if (!trivial) {
+        normalizeBox(s);
+        WbApp.pushHistory();
+        wb.annotations.push(s);
+        wbRedraw();
+        wbSaveAndSync();
+      }
+    }
+  };
+
+  canvas.addEventListener('pointerup', onUp);
+  canvas.addEventListener('pointercancel', onUp);
+  canvas.addEventListener('contextmenu', (e) => {
+    if (App.activeTab !== 'whiteboard') return;
+    const pos = getPos(e);
+    const p = toWbSpace(pos);
+    const wb = WhiteboardsStore.getActive();
+    if (!wb) return;
+    for (let i = wb.annotations.length - 1; i >= 0; i--) {
+      const a = wb.annotations[i];
+      if (hitTestAnnotation(a, p, WbApp.scale)) {
+        e.preventDefault();
+        closeExportMenu(); closeShapesMenu();
+        WbApp.selected = a.id;
+        wbRedraw();
+        openContextMenuAt(e.clientX, e.clientY, { pageNum: 0, id: a.id, isWhiteboard: true });
+        return;
+      }
+    }
+    closeContextMenu();
+  });
+
+}
+
+function wbEraseAt(p, g) {
+  const wb = WhiteboardsStore.getActive();
+  if (!wb) return;
+  for (let i = wb.annotations.length - 1; i >= 0; i--) {
+    if (hitTestAnnotation(wb.annotations[i], p, WbApp.scale)) {
+      if (g && !g.pushed) { WbApp.pushHistory(); g.pushed = true; }
+      if (WbApp.selected === wb.annotations[i].id) WbApp.selected = null;
+      wb.annotations.splice(i, 1);
+      wbRedraw();
+      wbSaveAndSync();
+      break;
+    }
+  }
+}
+
+// Tab Switching
+function switchTab(tab) {
+  if (App.activeTab === tab) return;
+  closeTextEditor(true);
+  closeWbTextEditor(true);
+  App.activeTab = tab;
+  const isPdf = tab === 'pdf';
+
+  $('tabPdf').classList.toggle('active', isPdf);
+  $('tabPdf').setAttribute('aria-selected', String(isPdf));
+  $('tabWhiteboard').classList.toggle('active', !isPdf);
+  $('tabWhiteboard').setAttribute('aria-selected', String(!isPdf));
+
+  $('stage').classList.toggle('hidden', !isPdf);
+  $('whiteboardStage').classList.toggle('hidden', isPdf);
+  $('whiteboardStage').classList.toggle('flex', !isPdf);
+
+  const nav = $('pdfNavControls');
+  if (nav) {
+    nav.classList.toggle('opacity-30', !isPdf);
+    nav.classList.toggle('pointer-events-none', !isPdf);
+  }
+  $('btnToggleComments').classList.toggle('hidden', !isPdf);
+  $('btnToggleThumbnails').classList.toggle('hidden', !isPdf);
+  $('btnConvertPageText').classList.toggle('hidden', !isPdf);
+  $('btnClearPage').querySelector('span').textContent = isPdf ? 'Clear Page' : 'Clear Whiteboard';
+
+  if (!isPdf) {
+    fitWhiteboardToViewport();
+    updateWhiteboardHeader();
+    wbRedraw();
+  } else {
+    requestVisibleUpdate();
+    fullRedrawAllPages();
+  }
+  updateHistoryButtons();
+  refreshControls();
+  renderIcons();
+  scheduleSettingsSave();
+}
+
+function updateWhiteboardHeader() {
+  const wb = WhiteboardsStore.getActive();
+  if (!wb) return;
+  const titleInput = $('wbTitleInput');
+  if (titleInput && document.activeElement !== titleInput) {
+    titleInput.value = wb.name;
+  }
+  $('wbZoomLabel').textContent = Math.round(WbApp.scale * 100) + '%';
+  const ind = $('wbAutosaveIndicator');
+  if (ind) {
+    ind.innerHTML = '<i data-lucide="check" class="w-3.5 h-3.5 text-emerald-500"></i><span>Saved</span>';
+    renderIcons();
+  }
+}
+
+function switchToWhiteboardTab(wbId) {
+  if (wbId && WhiteboardsStore.get(wbId)) {
+    WhiteboardsStore.activeId = wbId;
+    WhiteboardsStore.save();
+  }
+  switchTab('whiteboard');
+}
+
+// Render "Neat Stack" in Hover Flyout
+function renderWhiteboardsStack() {
+  const listEl = $('whiteboardStackList');
+  if (!listEl) return;
+  listEl.innerHTML = '';
+  const items = WhiteboardsStore.items;
+  $('wbBadge').textContent = String(items.length);
+
+  if (!items.length) {
+    listEl.innerHTML = '<div class="text-center py-6 text-faint text-xs">No whiteboards yet. Click New to create one!</div>';
+    return;
+  }
+
+  items.forEach((wb) => {
+    const card = document.createElement('div');
+    card.className = `wb-stack-card group ${wb.id === WhiteboardsStore.activeId ? 'active' : ''}`;
+    card.title = `Click to place "${wb.name}" onto the PDF page`;
+
+    const thumb = document.createElement('div');
+    thumb.className = 'wb-thumb-preview';
+    if (wb.thumbnailDataUrl) {
+      const img = document.createElement('img');
+      img.src = wb.thumbnailDataUrl;
+      img.alt = wb.name;
+      thumb.appendChild(img);
+    } else {
+      thumb.innerHTML = '<i data-lucide="presentation" class="w-4 h-4 text-faint"></i>';
+    }
+
+    const info = document.createElement('div');
+    info.className = 'flex-1 min-w-0';
+    const name = document.createElement('div');
+    name.className = 'text-xs font-semibold text-fg truncate group-hover:text-accent transition';
+    name.textContent = wb.name;
+    const sub = document.createElement('div');
+    sub.className = 'text-[10px] text-faint flex items-center gap-1.5 mt-0.5';
+    const count = (wb.annotations || []).length;
+    sub.textContent = `${count} mark${count === 1 ? '' : 's'} • Click to place`;
+    info.append(name, sub);
+
+    const actions = document.createElement('div');
+    actions.className = 'flex items-center gap-1 shrink-0';
+    const editBtn = document.createElement('button');
+    editBtn.className = 'p-1.5 rounded-lg text-muted hover:text-fg hover:bg-hairline transition';
+    editBtn.title = 'Open in Whiteboard Editor';
+    editBtn.innerHTML = '<i data-lucide="edit-3" class="w-3.5 h-3.5"></i>';
+    editBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      $('whiteboardStackFlyout').classList.add('hidden');
+      $('btnWhiteboardStack').setAttribute('aria-expanded', 'false');
+      switchToWhiteboardTab(wb.id);
+    });
+    actions.appendChild(editBtn);
+
+    card.append(thumb, info, actions);
+
+    card.addEventListener('click', () => {
+      $('whiteboardStackFlyout').classList.add('hidden');
+      $('btnWhiteboardStack').setAttribute('aria-expanded', 'false');
+      placeWhiteboardOnPdf(wb.id);
+    });
+
+    listEl.appendChild(card);
+  });
+  renderIcons();
+}
+
+function updateWhiteboardsUI() {
+  const badge = $('wbBadge');
+  if (badge) badge.textContent = String(WhiteboardsStore.items.length);
+  renderWhiteboardsStack();
+  updateWhiteboardHeader();
+}
+
+function placeWhiteboardOnPdf(wbId) {
+  const wb = WhiteboardsStore.get(wbId);
+  if (!wb) return;
+  if (!App.pdfDoc) {
+    showToast('Open a PDF document first to place whiteboards on it.', {
+      actions: [
+        { label: 'Load Sample PDF', onClick: () => { loadSampleDocument().then(() => placeWhiteboardOnPdf(wbId)); } },
+        { label: 'Open Whiteboard', onClick: () => switchToWhiteboardTab(wbId) }
+      ]
+    });
+    return;
+  }
+
+  if (App.activeTab !== 'pdf') {
+    switchTab('pdf');
+  }
+
+  const n = App.activePage;
+  const size = App.pageSizes[n] || { w: 612, h: 792 };
+  const c = visibleCenterPdfPos(n);
+  const w = clamp(size.w * 0.45, 140, 380);
+  const h = w * (wb.height / wb.width);
+
+  const a = {
+    id: genId(),
+    type: 'whiteboard',
+    whiteboardId: wb.id,
+    x: clamp(c.x - w / 2, 10, Math.max(10, size.w - w - 10)),
+    y: clamp(c.y - h / 2, 10, Math.max(10, size.h - h - 10)),
+    width: w,
+    height: h,
+    dataUrl: wb.thumbnailDataUrl
+  };
+
+  pushHistory();
+  App.pageAnnotations[n].push(a);
+  setTool('select');
+  setSelected({ pageNum: n, id: a.id });
+  requestRedraw(n);
+  scheduleAutosave();
+
+  showToast(`Placed "${wb.name}" on page ${n}. Double-click it anytime to edit.`, { duration: 4500 });
+}
+
+function initWhiteboardUI() {
+  WhiteboardsStore.init();
+  initWhiteboardPointerEvents();
+
+  // Tab switcher
+  $('tabPdf').addEventListener('click', () => switchTab('pdf'));
+  $('tabWhiteboard').addEventListener('click', () => switchTab('whiteboard'));
+
+  // Whiteboard stack button hover flyout
+  const wbWrap = $('whiteboardStackWrap');
+  const wbFlyout = $('whiteboardStackFlyout');
+  const btnStack = $('btnWhiteboardStack');
+  let wbTimer = null;
+
+  function openWbFlyout() {
+    clearTimeout(wbTimer);
+    closeExportMenu();
+    closeThemeMenu();
+    closeShapesMenu();
+    renderWhiteboardsStack();
+    wbFlyout.classList.remove('hidden');
+    btnStack.setAttribute('aria-expanded', 'true');
+  }
+
+  function closeWbFlyout() {
+    clearTimeout(wbTimer);
+    wbTimer = setTimeout(() => {
+      wbFlyout.classList.add('hidden');
+      btnStack.setAttribute('aria-expanded', 'false');
+    }, 220);
+  }
+
+  wbWrap.addEventListener('mouseenter', openWbFlyout);
+  wbWrap.addEventListener('mouseleave', closeWbFlyout);
+  wbFlyout.addEventListener('mouseenter', () => clearTimeout(wbTimer));
+  wbFlyout.addEventListener('mouseleave', closeWbFlyout);
+  btnStack.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (wbFlyout.classList.contains('hidden')) openWbFlyout(); else closeWbFlyout();
+  });
+  document.addEventListener('click', () => {
+    wbFlyout.classList.add('hidden');
+    btnStack.setAttribute('aria-expanded', 'false');
+  });
+
+  $('btnNewWhiteboardQuick').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const wb = WhiteboardsStore.create();
+    switchToWhiteboardTab(wb.id);
+    wbFlyout.classList.add('hidden');
+    showToast(`Created "${wb.name}"`);
+  });
+
+  $('btnGoToWhiteboardTab').addEventListener('click', () => {
+    wbFlyout.classList.add('hidden');
+    switchTab('whiteboard');
+  });
+
+  // Whiteboard subheader controls
+  $('wbTitleInput').addEventListener('change', (e) => {
+    const wb = WhiteboardsStore.getActive();
+    if (!wb) return;
+    WhiteboardsStore.rename(wb.id, e.target.value);
+    showToast(`Renamed to "${wb.name}"`);
+  });
+  $('wbTitleInput').addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') $('wbTitleInput').blur();
+  });
+
+  $('btnNewWhiteboard').addEventListener('click', () => {
+    const wb = WhiteboardsStore.create();
+    switchToWhiteboardTab(wb.id);
+    showToast(`Created "${wb.name}". Ready to draw!`);
+  });
+
+  $('btnWbPlaceOnPdf').addEventListener('click', () => {
+    const wb = WhiteboardsStore.getActive();
+    if (wb) placeWhiteboardOnPdf(wb.id);
+  });
+
+  $('btnDeleteWhiteboard').addEventListener('click', async () => {
+    const wb = WhiteboardsStore.getActive();
+    if (!wb) return;
+    const ok = await openConfirm({
+      title: `Delete "${wb.name}"?`,
+      message: 'This whiteboard will be removed from your saved list.',
+      confirmLabel: 'Delete whiteboard'
+    });
+    if (!ok) return;
+    WhiteboardsStore.remove(wb.id);
+    WbApp.selected = null;
+    WbApp.resetHistory();
+    updateWhiteboardsUI();
+    wbRedraw();
+    showToast('Deleted whiteboard.');
+  });
+
+  $('btnWbZoomIn').addEventListener('click', () => {
+    WbApp.setScale(WbApp.scale + 0.15);
+  });
+  $('btnWbZoomOut').addEventListener('click', () => {
+    WbApp.setScale(WbApp.scale - 0.15);
+  });
+  $('btnWbFit').addEventListener('click', fitWhiteboardToViewport);
+
+  // Resize handler
+  window.addEventListener('resize', debounce(() => {
+    if (App.activeTab === 'whiteboard') fitWhiteboardToViewport();
+  }, 200));
+
+  updateWhiteboardsUI();
+}
+
 // =======================================================================
 // BOOT
 // =======================================================================
@@ -5644,6 +7148,7 @@ applyThumbsState();
 updateHistoryButtons();
 updatePageIndicator();
 setTool('pen');
+initWhiteboardUI();
 if (!LIBS_OK) showToast('The PDF libraries could not be loaded. Check your connection and reload the page.', { persistent: true });
 </script>
 </body>
