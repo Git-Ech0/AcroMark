@@ -343,7 +343,7 @@
     <div class="flex items-center gap-2 shrink-0">
       <span id="sizeLabel" class="text-muted font-medium">Stroke Size:</span>
       <input type="range" id="sizeSlider" min="1" max="25" value="3" class="w-24 accent-[#d3923c] cursor-pointer" aria-label="Stroke size" />
-      <span id="sizeValueLabel" class="w-5 text-center">3</span>
+      <input type="text" id="sizeValueLabel" inputmode="decimal" autocomplete="off" spellcheck="false" class="no-spinner w-11 bg-transparent text-center text-xs font-semibold outline-none rounded focus:bg-raised" aria-label="Size value" value="3" />
     </div>
 
     <div id="opacityControl" class="hidden items-center gap-2 shrink-0">
@@ -1137,8 +1137,12 @@ function aggregateRunStyle(runs) {
     const first = runs[0][key];
     return runs.every((r) => r[key] === first) ? first : (isBool ? false : first);
   };
+  // Font size has a real "mixed" state the toolbar needs to show as blank — exactly like Google
+  // Slides' size box goes empty when a selection spans more than one size — rather than silently
+  // reporting the first run's size as if the whole selection agreed on it.
+  const uniformSize = runs.length > 0 && runs.every((r) => r.fontSize === runs[0].fontSize);
   return {
-    color: pick('color', false), fontSize: pick('fontSize', false), fontFamily: pick('fontFamily', false),
+    color: pick('color', false), fontSize: uniformSize ? runs[0].fontSize : null, fontFamily: pick('fontFamily', false),
     bold: pick('bold', true), italic: pick('italic', true), underline: pick('underline', true),
     superscript: pick('superscript', true), subscript: pick('subscript', true)
   };
@@ -1199,6 +1203,13 @@ let idCounter = 1;
 function genId() { return 'a' + (idCounter++) + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+// Formats a size for the typed-value field: up to one decimal place, no trailing ".0" — so "14"
+// stays "14" but a precise drag or typed entry like "13.5" is shown (and kept) exactly.
+function formatSizeValue(n) {
+  if (n == null || !Number.isFinite(n)) return '';
+  const r = Math.round(n * 10) / 10;
+  return Number.isInteger(r) ? String(r) : r.toFixed(1);
+}
 function debounce(fn, ms) { let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); }; }
 function renderIcons() { try { if (window.lucide) lucide.createIcons(); } catch (e) { /* icons are decorative */ } }
 
@@ -1244,12 +1255,12 @@ function setCustomColorPickerValue(hex) { customColorPicker.value = hex; customC
 // (dragging the size slider, opening the native color picker) — losing focus to one of these isn't
 // the person leaving the box, so the editor's blur handler keeps it open for them instead of
 // committing and closing it. Focus is handed back once the interaction with the control ends.
-function isFormatControlEl(el) { return el === sizeSlider || el === customColorPicker; }
-// True from a pointerdown on the size slider / colour picker until the next pointerdown anywhere
-// else, so the editor's blur handler knows focus left it on purpose (see the blur handler).
+function isFormatControlEl(el) { return el === sizeSlider || el === sizeValueLabel || el === customColorPicker; }
+// True from a pointerdown on the size slider / size field / colour picker until the next pointerdown
+// anywhere else, so the editor's blur handler knows focus left it on purpose (see the blur handler).
 let formatControlHeld = false;
 document.addEventListener('pointerdown', (e) => {
-  formatControlHeld = e.target instanceof Element && !!e.target.closest('#sizeSlider, #customColorWrap');
+  formatControlHeld = e.target instanceof Element && !!e.target.closest('#sizeSlider, #sizeValueLabel, #customColorWrap');
 }, true);
 function returnFocusToEditor() {
   formatControlHeld = false;
@@ -4381,11 +4392,7 @@ function currentTextStyle() {
   if (activeTextEditor) return activeTextEditor.getStyle();
   const sel = getSelectedAnnotation();
   if (sel && sel.type === 'text') {
-    return {
-      color: sel.color, fontSize: sel.fontSize, fontFamily: sel.fontFamily || 'helvetica',
-      bold: sel.bold !== false, italic: !!sel.italic, underline: !!sel.underline,
-      superscript: !!sel.superscript, subscript: !!sel.subscript, align: sel.align || 'left', lineHeight: lineHeightOf(sel)
-    };
+    return { ...aggregateRunStyle(runsFromAnnotation(sel)), align: sel.align || 'left', lineHeight: lineHeightOf(sel) };
   }
   return {
     color: App.color, fontSize: App.fontSize, fontFamily: App.fontFamily, bold: App.bold, italic: App.italic,
@@ -4449,10 +4456,20 @@ function refreshControls() {
   else if (mode === 'highlighter') { label = 'Highlighter Size:'; min = 6; max = 40; val = sel ? sel.width : App.highlighterWidth; }
   else { label = mode === 'none' ? 'Resize with the corner handle' : 'Stroke Size:'; min = 1; max = 25; val = sel && mode !== 'none' ? sel.width : App.strokeWidth; }
   sizeLabel.textContent = label;
-  sizeSlider.min = min; sizeSlider.max = max; sizeSlider.value = mode === 'none' ? min : Math.round(val);
-  sizeValueLabel.textContent = mode === 'none' ? '–' : String(Math.round(val));
+  sizeSlider.min = min; sizeSlider.max = max;
+  // val is null exactly when a text selection spans more than one font size — leave the slider
+  // thumb where it is (there's no single position to show) and blank the typed field, same as
+  // Google Slides' size box goes empty for a mixed selection.
+  if (mode === 'none') sizeSlider.value = min;
+  else if (val != null) sizeSlider.value = Math.round(val);
+  // Never overwrite the field while the person is actively typing into it.
+  if (document.activeElement !== sizeValueLabel) {
+    sizeValueLabel.value = mode === 'none' ? '–' : formatSizeValue(val);
+  }
   sizeSlider.disabled = mode === 'none';
+  sizeValueLabel.disabled = mode === 'none';
   sizeSlider.classList.toggle('opacity-40', mode === 'none');
+  sizeValueLabel.classList.toggle('opacity-40', mode === 'none');
   const showOp = mode === 'highlighter';
   opacityControl.classList.toggle('hidden', !showOp);
   opacityControl.classList.toggle('flex', showOp);
@@ -5176,9 +5193,12 @@ document.querySelectorAll('#textStyleControls [data-text-align]').forEach((btn) 
   btn.addEventListener('click', () => applyTextStyle({ align: btn.dataset.textAlign }));
 });
 
-sizeSlider.addEventListener('input', (e) => {
-  const v = +e.target.value;
-  sizeValueLabel.textContent = String(v);
+// Applies a new size value to whatever the size control currently targets — the live text editor's
+// selection/caret, a selected annotation, or the app's new-shape defaults. Shared by the slider
+// (coarse, integer drag) and the typed-value field (exact, decimal entry) so they always agree.
+// Applying a value here is also what resolves a "mixed sizes" selection back to a single size —
+// exactly like typing a size into Google Slides' box while a mixed selection is active.
+function applySizeValue(v) {
   if (activeTextEditor) { App.fontSize = v; activeTextEditor.setStyle({ fontSize: v }); return; }
   const sel = getSelectedAnnotation();
   if (sel && sel.type !== 'image') {
@@ -5190,9 +5210,38 @@ sizeSlider.addEventListener('input', (e) => {
   if (App.activeTool === 'text' || App.activeTool === 'sense') App.fontSize = v;
   else if (App.activeTool === 'highlighter') App.highlighterWidth = v;
   else App.strokeWidth = v;
+}
+sizeSlider.addEventListener('input', (e) => {
+  const v = +e.target.value;
+  sizeValueLabel.value = formatSizeValue(v);
+  applySizeValue(v);
 });
 sizeSlider.addEventListener('change', () => { App.styleEditOpen = false; returnFocusToEditor(); });
 sizeSlider.addEventListener('pointerup', returnFocusToEditor);
+// The typed-value field is the decimal-accurate counterpart to the slider's coarse drag — type an
+// exact size (e.g. 13.5) and commit with Enter or by clicking away. Left blank while a text
+// selection spans more than one size; typing a value there resolves the whole selection to it.
+let suppressSizeCommit = false;
+function commitSizeValueInput() {
+  if (sizeSlider.disabled) { refreshControls(); return; }
+  const raw = sizeValueLabel.value.trim();
+  const parsed = parseFloat(raw);
+  if (!raw || !Number.isFinite(parsed)) { refreshControls(); return; }   // empty/invalid — revert, apply nothing
+  const v = Math.round(clamp(parsed, +sizeSlider.min, +sizeSlider.max) * 10) / 10;
+  sizeSlider.value = Math.round(v);
+  sizeValueLabel.value = formatSizeValue(v);
+  applySizeValue(v);
+}
+sizeValueLabel.addEventListener('focus', () => sizeValueLabel.select());
+sizeValueLabel.addEventListener('keydown', (e) => {
+  e.stopPropagation();
+  if (e.key === 'Enter') { e.preventDefault(); sizeValueLabel.blur(); }
+  else if (e.key === 'Escape') { e.preventDefault(); suppressSizeCommit = true; sizeValueLabel.blur(); }
+});
+sizeValueLabel.addEventListener('blur', () => {
+  if (suppressSizeCommit) { suppressSizeCommit = false; refreshControls(); } else { commitSizeValueInput(); }
+  App.styleEditOpen = false; returnFocusToEditor();
+});
 opacitySlider.addEventListener('input', (e) => {
   const v = +e.target.value;
   opacityValueLabel.textContent = `${v}%`;
