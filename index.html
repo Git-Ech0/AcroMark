@@ -373,6 +373,12 @@
         <button type="button" class="tool-btn" data-text-align="center" title="Align center" aria-pressed="false"><i data-lucide="align-center" class="w-4 h-4"></i></button>
         <button type="button" class="tool-btn" data-text-align="right" title="Align right" aria-pressed="false"><i data-lucide="align-right" class="w-4 h-4"></i></button>
       </div>
+      <div class="flex items-center gap-1" role="group" aria-label="Line spacing">
+        <span class="text-muted font-medium" title="Line spacing for the whole text box">Spacing</span>
+        <button type="button" id="btnLineSpaceDown" class="seg" title="Tighter line spacing" aria-label="Decrease line spacing">&minus;</button>
+        <span id="lineSpaceValue" class="w-9 text-center" style="font-variant-numeric: tabular-nums;" title="Line spacing (× font size)">1.25</span>
+        <button type="button" id="btnLineSpaceUp" class="seg" title="Looser line spacing" aria-label="Increase line spacing">+</button>
+      </div>
     </div>
 
     <div class="h-4 w-[1px] bg-hairline shrink-0"></div>
@@ -618,7 +624,18 @@
 // with viewport.convertToPdfPoint, so rotated / cropped pages line up.
 // =======================================================================
 /* CORE:BEGIN */
-const LINE_H = 1.25; // text line height (× font size)
+const LINE_H = 1.25; // text line height (× font size) — the default; each text box can override it via `lineHeight`
+const LINE_H_MIN = 0.8, LINE_H_MAX = 3;
+// Values the toolbar's − / + buttons walk through (finer around the commonly used 1–1.5 range).
+const LINE_SPACING_STEPS = [0.8, 0.9, 1, 1.1, 1.15, 1.25, 1.35, 1.5, 1.75, 2, 2.25, 2.5, 3];
+function clampLineHeight(v) {
+  if (v == null) return LINE_H;
+  const n = +v;
+  if (!Number.isFinite(n)) return LINE_H;
+  return Math.min(LINE_H_MAX, Math.max(LINE_H_MIN, Math.round(n * 100) / 100));
+}
+// One line-spacing value for the whole box (like paragraph alignment) — never per character.
+function lineHeightOf(a) { return clampLineHeight(a ? a.lineHeight : null); }
 
 // Arrow in document units: the shaft stops inside the head so thick strokes
 // never poke out past the tip, and the head size doesn't depend on zoom.
@@ -939,8 +956,8 @@ async function buildAnnotatedPdf(opts) {
               let top = 0;
               laidLines.forEach((pieces, li) => {
                 let lineH = 0;
-                pieces.forEach((p) => { lineH = Math.max(lineH, p.fontSize * LINE_H); });
-                if (!lineH) lineH = (a.fontSize || 16) * LINE_H;
+                pieces.forEach((p) => { lineH = Math.max(lineH, p.fontSize * lineHeightOf(a)); });
+                if (!lineH) lineH = (a.fontSize || 16) * lineHeightOf(a);
                 const dx = align === 'center' ? (maxW - lineWs[li]) / 2 : align === 'right' ? (maxW - lineWs[li]) : 0;
                 let px = dx;
                 for (const piece of pieces) {
@@ -1140,7 +1157,7 @@ const App = {
 
   activeTool: 'pen', spaceHeld: false,
   color: '#ef4444', strokeWidth: 3, highlighterWidth: 18, highlighterOpacity: 0.35, fontSize: 16,
-  fontFamily: 'helvetica', bold: true, italic: false, underline: false, superscript: false, subscript: false, align: 'left',
+  fontFamily: 'helvetica', bold: true, italic: false, underline: false, superscript: false, subscript: false, align: 'left', lineHeight: LINE_H,
 
   pageAnnotations: {},                 // n -> [annotation]  (geometry in document units = scale 1)
   comments: [],                        // {id, pageNum, x, y, text, createdAt}
@@ -1202,6 +1219,7 @@ const sizeValueLabel = $('sizeValueLabel');
 const opacityControl = $('opacityControl');
 const textStyleControls = $('textStyleControls');
 const textStyleDivider = $('textStyleDivider');
+const lineSpaceValue = $('lineSpaceValue');
 const opacitySlider = $('opacitySlider');
 const opacityValueLabel = $('opacityValueLabel');
 const colorPaletteEl = $('colorPalette');
@@ -1424,7 +1442,8 @@ function sanitizeAnnotation(raw) {
         underline: !!raw.underline,
         superscript: !!raw.superscript && !raw.subscript,
         subscript: !!raw.subscript && !raw.superscript,
-        align: TEXT_ALIGNS.includes(raw.align) ? raw.align : 'left'
+        align: TEXT_ALIGNS.includes(raw.align) ? raw.align : 'left',
+        lineHeight: clampLineHeight(raw.lineHeight)
       };
       if (Array.isArray(raw.runs) && raw.runs.length) {
         const runs = raw.runs.slice(0, 4000).map(sanitizeRun).filter((r) => r && r.text);
@@ -1711,13 +1730,13 @@ function measureTextLines(a) {
       const fs = scriptFontSize(p);
       measureCtx.font = canvasFontString(p, 100);
       const w = p.text ? measureCtx.measureText(p.text).width * fs / 100 : 0;
-      lineH = Math.max(lineH, p.fontSize * LINE_H);
+      lineH = Math.max(lineH, p.fontSize * lineHeightOf(a));
       const piece = { ...p, x, w };
       x += w;
       return piece;
     });
     maxW = Math.max(maxW, x);
-    if (!lineH) lineH = (a.fontSize || 16) * LINE_H;
+    if (!lineH) lineH = (a.fontSize || 16) * lineHeightOf(a);
     const line = { pieces: measured, w: x, top, h: lineH };
     top += lineH;
     return line;
@@ -2687,6 +2706,9 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
   let align = existing ? (existing.align || 'left') : sensedBlock ? (sensedBlock.align || 'left') : App.align;
   const originalRuns = runs.map((r) => ({ ...r }));
   const originalAlign = align;
+  // One line-spacing value for the whole box, like `align`.
+  let lineHeight = existing ? lineHeightOf(existing) : sensedBlock ? clampLineHeight(sensedBlock.lineHeight) : clampLineHeight(App.lineHeight);
+  const originalLineHeight = lineHeight;
   const originalText = textFromRuns(originalRuns);
   // Last selection / caret seen inside this editor, as character offsets. Clicking a toolbar
   // control (size slider, colour picker, eyedropper, page canvas while sampling) can move the live
@@ -2702,7 +2724,7 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
   // shift left by the thin dashed border + minimal padding, so typed text starts exactly at
   // the placed (or sensed) document x — see the "inline text editor" CSS for those numbers.
   editorEl.style.left = `${at.x * App.scale - 3.5}px`;
-  editorEl.style.lineHeight = String(LINE_H);
+  editorEl.style.lineHeight = String(lineHeight);
 
   function renderEditorSpan(run) {
     const span = document.createElement('span');
@@ -2724,6 +2746,14 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
   function renderRuns() {
     editorEl.innerHTML = '';
     for (const r of runs) { if (r.text) editorEl.appendChild(renderEditorSpan(r)); }
+    // In a white-space:pre box a trailing "\n" draws no line box for the new, still-empty last
+    // line — so the caret has nowhere to go and Shift+Enter seems to do nothing. A marker <br>
+    // (never read back as text, see syncRunsFromDom) gives that empty line something to sit on.
+    if (textFromRuns(runs).endsWith('\n')) {
+      const br = document.createElement('br');
+      br.dataset.trailing = '1';
+      editorEl.appendChild(br);
+    }
   }
   // The style an unstyled bit of DOM (a bare text node the browser just inserted, say) should be
   // read as — whatever the first run is currently carrying, or the app's new-text defaults if the
@@ -2753,6 +2783,7 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
         if (node.nodeType === Node.TEXT_NODE) {
           if (node.textContent) collected.push({ text: node.textContent, ...currentDefaultStyle() });
         } else if (node.nodeType === Node.ELEMENT_NODE) {
+          if (node.dataset && node.dataset.trailing) continue;   // our own empty-last-line marker, not text
           if (node.tagName === 'BR') {
             collected.push({ text: '\n', ...currentDefaultStyle() });
           } else if (node.dataset && node.dataset.style) {
@@ -2844,18 +2875,54 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
     return normalizeRuns(out);
   }
   function domPositionForOffset(offset) {
+    const spans = Array.from(editorEl.childNodes).filter((n) => !(n.dataset && n.dataset.trailing));
     let pos = 0;
-    for (const span of editorEl.childNodes) {
-      const len = span.textContent.length;
-      if (offset <= pos + len) {
+    for (let i = 0; i < spans.length; i++) {
+      const span = spans[i], len = span.textContent.length;
+      // A boundary sitting right after a "\n" belongs to the start of the next span, so the
+      // caret lands on the new line instead of dangling at the end of the previous one.
+      const stopHere = offset < pos + len || (offset === pos + len && !(len && span.textContent.endsWith('\n') && i < spans.length - 1));
+      if (stopHere) {
         const node = span.firstChild;
         return node ? { node, offset: offset - pos } : { node: span, offset: 0 };
       }
       pos += len;
     }
-    const last = editorEl.lastChild;
+    const last = spans[spans.length - 1];
     if (last) { const node = last.firstChild; return node ? { node, offset: node.textContent.length } : { node: last, offset: 0 }; }
     return { node: editorEl, offset: 0 };
+  }
+  // The parts of `list` inside [a, b), clipped to whole characters.
+  function clipRuns(list, a, b) {
+    const out = []; let pos = 0;
+    for (const r of list) {
+      const rs = pos, re = pos + r.text.length; pos = re;
+      const from = Math.max(rs, a), to = Math.min(re, b);
+      if (to > from) out.push({ ...r, text: r.text.slice(from - rs, to - rs) });
+    }
+    return out;
+  }
+  // Inserts `text` at the caret (replacing any selection) straight into the run model, then
+  // re-renders — used for Shift+Enter and paste so the result never depends on how a given
+  // browser's execCommand handles newlines. `keepPending` carries a staged style past the insert
+  // (a line break shouldn't use it up); ordinary text consumes it, like typing would.
+  function insertPlainText(text, keepPending) {
+    if (!text) return;
+    syncRunsFromDom();
+    const total = textFromRuns(runs).length;
+    const cur = effectiveSelection() || { start: total, end: total };
+    const start = Math.min(cur.start, total), end = Math.min(cur.end, total);
+    const base = (pendingStyle && pendingStyleOffset === start) ? { ...styleAtOffset(start), ...pendingStyle } : styleAtOffset(start);
+    const ins = { text };
+    RUN_STYLE_KEYS.forEach((k) => { ins[k] = base[k]; });
+    runs = normalizeRuns([...clipRuns(runs, 0, start), ins, ...clipRuns(runs, end, Infinity)]);
+    renderRuns();
+    const caret = start + text.length;
+    restoreSelection(caret, caret);
+    if (keepPending && pendingStyle) pendingStyleOffset = caret; else { pendingStyle = null; pendingStyleOffset = null; }
+    preInputCaret = null;
+    fit();
+    syncTextStyleButtons();
   }
   function restoreSelection(start, end) {
     try {
@@ -2900,14 +2967,15 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
     editorEl.style.color = first.color || App.color;
     editorEl.style.fontSize = `${fontPx}px`;
     editorEl.style.textAlign = align;
+    editorEl.style.lineHeight = String(lineHeight);
     // align the editor's first baseline with where the annotation will be drawn (including the
     // raised/dropped baseline while the first run's superscript/subscript is on)
-    editorEl.style.top = `${at.y * App.scale + shiftPx - 2.5 - 0.97 * fontPx}px`;
+    editorEl.style.top = `${at.y * App.scale + shiftPx - 2.5 - fontPx * (0.97 + (lineHeight - LINE_H) / 2)}px`;   // half-leading grows with line-height; keep the first baseline pinned
     editorEl.style.width = `${Math.max(40, maxW + 6)}px`;
     let totalH = 0;
     lines.forEach((pieces) => {
-      let lh = fontPx * LINE_H;
-      pieces.forEach((p) => { lh = Math.max(lh, Math.max(16, scriptFontSize(p) * App.scale) * LINE_H); });
+      let lh = fontPx * lineHeight;
+      pieces.forEach((p) => { lh = Math.max(lh, Math.max(16, scriptFontSize(p) * App.scale) * lineHeight); });
       totalH += lh;
     });
     editorEl.style.height = `${totalH + 6}px`;
@@ -2942,19 +3010,20 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
       const selR = cur && cur.start !== cur.end ? cur : null;
       const caret = cur ? cur.start : null;
       if (!selR && pendingStyle) {
-        if (caret === pendingStyleOffset) return { ...styleAtOffset(caret), ...pendingStyle, align };
+        if (caret === pendingStyleOffset) return { ...styleAtOffset(caret), ...pendingStyle, align, lineHeight };
         pendingStyle = null; pendingStyleOffset = null;
       }
       if (selR) {
         const slice = runsSliceInRange(runs, selR.start, selR.end);
-        return { ...aggregateRunStyle(slice.length ? slice : [currentDefaultStyle()]), align };
+        return { ...aggregateRunStyle(slice.length ? slice : [currentDefaultStyle()]), align, lineHeight };
       }
       // A bare caret reports the style of the character just before it, so the toolbar follows
       // the caret around the box instead of averaging the whole thing.
-      if (caret != null) return { ...styleAtOffset(caret), align };
-      return { ...aggregateRunStyle(runs.length ? runs : [currentDefaultStyle()]), align };
+      if (caret != null) return { ...styleAtOffset(caret), align, lineHeight };
+      return { ...aggregateRunStyle(runs.length ? runs : [currentDefaultStyle()]), align, lineHeight };
     },
     setStyle(patch) {
+      if (Object.prototype.hasOwnProperty.call(patch, 'lineHeight')) { lineHeight = clampLineHeight(patch.lineHeight); fit(); return; }
       if (Object.prototype.hasOwnProperty.call(patch, 'align')) { align = patch.align; fit(); return; }
       syncRunsFromDom();
       const cur = effectiveSelection();
@@ -3003,21 +3072,21 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
         trimRemaining -= take;
       }
       const runs2 = normalizeRuns(finalRuns);
-      const styleChanged = JSON.stringify(runs2) !== JSON.stringify(originalRuns) || align !== originalAlign;
+      const styleChanged = JSON.stringify(runs2) !== JSON.stringify(originalRuns) || align !== originalAlign || lineHeight !== originalLineHeight;
       if (existing) {
         if (!val.trim()) {
           pushHistory(); removeAnnotationById(pageNum, existing.id);
           if (App.selected && App.selected.id === existing.id) App.selected = null;
         } else if (val !== existing.text || styleChanged) {
           pushHistory();
-          existing.text = val; existing.runs = runs2; existing.align = align;
+          existing.text = val; existing.runs = runs2; existing.align = align; existing.lineHeight = lineHeight;
           syncFlatStyleFromRuns(existing, runs2);
         } else return;
       } else if (sensedBlock) {
         if (!val.trim() || (val === originalText && !styleChanged)) return;   // untouched — leave the real PDF text as-is
         pushHistory();
         const created = {
-          id: genId(), type: 'text', text: val, runs: runs2, align, x: at.x, y: at.y,
+          id: genId(), type: 'text', text: val, runs: runs2, align, lineHeight, x: at.x, y: at.y,
           coverRect: { ...sensedBlock.bbox }, coverColor: sensedBlock.bgColor || '#ffffff',
           // Text that came from an annotation (a Kami/Acrobat typed answer) sits *above* the page content,
           // so the whiteout patch alone can't hide it in the saved PDF — the export removes that very
@@ -3029,7 +3098,7 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
       } else {
         if (!val.trim()) return;
         pushHistory();
-        const created = { id: genId(), type: 'text', text: val, runs: runs2, align, x: at.x, y: at.y };
+        const created = { id: genId(), type: 'text', text: val, runs: runs2, align, lineHeight, x: at.x, y: at.y };
         syncFlatStyleFromRuns(created, runs2);
         App.pageAnnotations[pageNum].push(created);
       }
@@ -3079,10 +3148,9 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
   editorEl.addEventListener('input', () => { if (!composing) finalizeAfterEdit(); });
   editorEl.addEventListener('paste', (e) => {
     e.preventDefault();
-    const text = (e.clipboardData || window.clipboardData).getData('text/plain');
-    if (pendingStyle) preInputCaret = getCaretOffset();
-    if (text) document.execCommand('insertText', false, text);
-    finalizeAfterEdit();
+    const text = (e.clipboardData || window.clipboardData).getData('text/plain')
+      .replace(/\r\n?/g, '\n').replace(/\t/g, '    ');   // tabs can't be drawn or exported; use plain spaces
+    insertPlainText(text, false);
   });
   editorEl.addEventListener('keydown', (e) => {
     e.stopPropagation();
@@ -3101,11 +3169,7 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
     }
     if (e.key === 'Enter') {
       e.preventDefault();
-      if (e.shiftKey) {
-        if (pendingStyle) preInputCaret = getCaretOffset();
-        document.execCommand('insertText', false, '\n');
-        finalizeAfterEdit();
-      }
+      if (e.shiftKey) { if (!composing) insertPlainText('\n', true); }
       else api.finish(true);
       return;
     }
@@ -3362,27 +3426,83 @@ async function getAnnotationTextRuns(page) {
   return groups;
 }
 
+// Whitespace that PDFs use for layout but that can't be drawn or exported as-is (WinAnsi has no
+// tab or em space): rewritten as plain spaces, roughly matching the width it stood for.
+const SENSED_WS_SPACES = { '\t': 4, '\u2001': 4, '\u2002': 2, '\u2003': 4, '\u3000': 4 };
+function normalizeSensedWhitespace(str) {
+  return str
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+    .replace(/[\t\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, (ch) => ' '.repeat(SENSED_WS_SPACES[ch] || 1));
+}
+// How wide a space is (as a fraction of the font size) in the stand-in font sensed text will be
+// re-drawn with — gap widths are converted to a space count using that, so the gap comes out the
+// same width as the original.
+const spaceRatioCache = new Map();
+function spaceWidthRatio(family, bold, italic) {
+  const key = `${family}|${bold}|${italic}`;
+  if (spaceRatioCache.has(key)) return spaceRatioCache.get(key);
+  let r = 0.28;
+  try {
+    measureCtx.font = canvasFontString({ fontFamily: family, bold, italic }, 100);
+    const w = measureCtx.measureText(' ').width;
+    if (w > 0) r = w / 100;
+  } catch (e) { /* keep the fallback */ }
+  spaceRatioCache.set(key, r);
+  return r;
+}
+// A gap of `width` between two pieces of text -> how many spaces to put there. Anything up to
+// ~2.5 spaces wide is a normal (possibly justified/stretched) word gap and stays a single space;
+// wider than that is deliberate layout — an indent after a number, a tab stop — and is kept as
+// however many spaces it actually took up.
+function spacesForGap(width, spaceW) {
+  if (!(spaceW > 0)) return 1;
+  const ratio = width / spaceW;
+  return ratio < 2.5 ? 1 : Math.min(120, Math.round(ratio));
+}
+// Same idea for a whitespace-only item, which also knows how many whitespace characters the PDF
+// itself wrote (`natural`) — so "  " at its natural width stays two spaces.
+function spacesForBlank(width, spaceW, natural) {
+  if (!(spaceW > 0)) return Math.max(1, natural);
+  const ratio = width / spaceW;
+  if (ratio < 2.5) return Math.max(1, Math.min(natural || 1, Math.round(ratio)));
+  return Math.min(120, Math.round(ratio));
+}
+
 // One pdf.js text item -> the flat record the clustering below works on, or null for a pure
 // layout blank (no text and no width).
-function rawTextItem(page, item, viewport, style) {
+// `inkProbe(box)` (optional) says whether the rendered page has any visible ink inside a box — used
+// only to tell a real symbol glyph (bullet, checkmark) from a space glyph that pdf.js couldn't map.
+function rawTextItem(page, item, viewport, style, inkProbe) {
   if (!item.transform || item.transform.length !== 6) return null;
-  const hasText = !!(item.str && item.str.trim());
-  // Some glyphs — a bullet or checkmark from a dingbat/symbol font, a hand-picked "wingding"
+  const rawStr = typeof item.str === 'string' ? item.str : '';
+  const hasText = !!rawStr.trim();
+  // Whitespace-only text (spaces, tabs, em spaces) with real width is a *gap* — a number followed
+  // by a wide indent, say. It used to fall into the stand-in-glyph path below and come out as a
+  // literal "□"; it's kept as real spaces instead.
+  let blank = !hasText && rawStr.length > 0;
+  // Some glyphs — a bullet or checkmark from a dingbat/symbol font, a hand-picked \"wingding\"
   // character, anything whose font has no usable ToUnicode/text mapping — come back from
   // pdf.js as an empty string even though they have real width and sit at a real position on
-  // the page. The old filter dropped those outright, which silently punches a hole in the
-  // line: a bulleted line loses its bullet and gets misread as starting mid-sentence, or two
-  // words on either side of the missing symbol get run together. A true blank (no text and no
-  // width — a pure layout/kerning artifact) is still skipped; anything with real width is kept
-  // as a stand-in glyph so the line it belongs to still groups and spaces correctly.
+  // the page. Dropping those punches a hole in the line (a bulleted line loses its bullet, or two
+  // words either side get run together), so they're kept as a stand-in glyph. A true blank (no
+  // text and no width — a pure layout/kerning artifact) is still skipped.
   if (!hasText && !(item.width > 0.02)) return null;
   const st = style || {};
   const geo = textItemGeometry(item, viewport, st);
   const weight = guessFontWeight(page, item.fontName);
+  const fontFamily = classifyFontFamily(st.fontFamily);
+  const spaceW = spaceWidthRatio(fontFamily, weight.bold, weight.italic) * geo.fontHeight;
+  // An unmapped glyph with nothing drawn where it sits is a space glyph, not a symbol.
+  if (!hasText && !blank && inkProbe && !inkProbe({ x1: geo.x1, y1: geo.y1, x2: geo.x2, y2: geo.y2 })) blank = true;
+  const width = Math.max(0.01, item.width || 0);
+  let str;
+  if (hasText) str = normalizeSensedWhitespace(rawStr);
+  else if (blank) str = ' '.repeat(spacesForBlank(width, spaceW, normalizeSensedWhitespace(rawStr).length));
+  else str = '\u25A1';
   return {
-    str: hasText ? item.str : '\u25A1', unmapped: !hasText,
+    str, unmapped: !hasText && !blank, blank, spaceW,
     x1: geo.x1, y1: geo.y1, x2: geo.x2, y2: geo.y2, baseX: geo.baseX, baseY: geo.baseY,
-    angle: geo.angle, fontHeight: geo.fontHeight, fontFamily: classifyFontFamily(st.fontFamily),
+    angle: geo.angle, fontHeight: geo.fontHeight, fontFamily,
     bold: weight.bold, italic: weight.italic, hasEOL: !!item.hasEOL
   };
 }
@@ -3450,14 +3570,25 @@ function clusterTextItems(raw, pageNum, opts) {
   // ---- collapse each line's items into one text run + one bbox + one majority style ----
   const lineRecs = lines.map((ln) => {
     const items = [...ln.items].sort((a, b) => (a.baseX - b.baseX) || (a.baseY - b.baseY));
-    let text = '', x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity, wsum = 0, wlen = 0;
+    // Whitespace-only items at either end of a line are margin, not text — leaving them in would
+    // drag the line's start (and the replacement text's x) into the empty space before it.
+    while (items.length && items[0].blank) items.shift();
+    while (items.length && items[items.length - 1].blank) items.pop();
+    if (!items.length) return { text: '' };
+    let text = '', x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity, wsum = 0, wlen = 0, lastReal = null;
     const tally = new Map();
-    items.forEach((it, i) => {
-      if (i > 0) {
-        const prev = items[i - 1], gap = it.x1 - prev.x2;
-        if (gap > it.fontHeight * 0.14 && !/\s$/.test(text) && !/^\s/.test(it.str)) text += ' ';
+    items.forEach((it) => {
+      if (it.blank) { text += it.str; return; }   // an explicit run of spaces (already sized to its width)
+      if (lastReal) {
+        // Measured from the last real glyph, so a wide gap becomes as many spaces as it took up —
+        // minus any the PDF already wrote itself — rather than always collapsing to one.
+        const gap = it.x1 - lastReal.x2;
+        const want = gap > it.fontHeight * 0.14 ? spacesForGap(gap, it.spaceW) : 0;
+        const have = text.match(/ *$/)[0].length + it.str.match(/^ */)[0].length;
+        if (want > have) text += ' '.repeat(want - have);
       }
       text += it.str;
+      lastReal = it;
       x1 = Math.min(x1, it.x1); y1 = Math.min(y1, it.y1); x2 = Math.max(x2, it.x2); y2 = Math.max(y2, it.y2);
       wsum += it.fontHeight * it.str.length; wlen += it.str.length;
       const k = it.fontFamily + '|' + it.bold + '|' + it.italic;
@@ -3530,6 +3661,14 @@ function clusterTextItems(raw, pageNum, opts) {
         if (Math.max(...centers) - Math.min(...centers) < fontSize * 0.6) align = 'center';
       }
     }
+    // The original paragraph's own line pitch (median baseline-to-baseline gap ÷ font size), so a
+    // multi-line block is re-laid-out at the spacing it actually had instead of a fixed default.
+    let lineHeight = null;
+    if (b.lines.length > 1) {
+      const pitches = [];
+      for (let i = 1; i < b.lines.length; i++) { const d = b.lines[i].baseY - b.lines[i - 1].baseY; if (d > 0) pitches.push(d); }
+      if (pitches.length) { pitches.sort((x, y) => x - y); lineHeight = clampLineHeight(pitches[Math.floor(pitches.length / 2)] / fontSize); }
+    }
     return {
       id: null, page: pageNum,
       bbox: { x1: b.x1 - 1, y1: b.y1 - 1, x2: b.x2 + 1, y2: b.y2 + 1 },
@@ -3542,6 +3681,7 @@ function clusterTextItems(raw, pageNum, opts) {
       sampleBBoxes: b.lines.map((l) => ({ x1: l.x1, y1: l.y1, x2: l.x2, y2: l.y2, len: l.text.length })),
       text: b.lines.map((l) => l.text).join('\n'), x: first.baseX, y: first.baseY,
       fontSize, fontFamily, bold: boldS === 'true', italic: italicS === 'true', align,
+      ...(lineHeight != null ? { lineHeight } : {}),
       color: '#111827', bgColor: '#ffffff'
     };
   });
@@ -3555,7 +3695,12 @@ async function computeTextBlocks(page, pageNum) {
   const styles = textContent.styles || {};
   const raw = [];
   for (const item of textContent.items) {
-    const r = rawTextItem(page, item, viewport, styles[item.fontName]);
+    const r = rawTextItem(page, item, viewport, styles[item.fontName], (box) => {
+      const stt = App.pageState[pageNum];
+      if (!stt || !stt.pdfCanvas) return true;              // can't look — assume it's a real glyph
+      const c = sampleRegionColors(pageNum, box);
+      return c ? !!c.ink : true;
+    });
     if (r) raw.push(r);
   }
   const blocks = clusterTextItems(raw, pageNum, {});
@@ -3646,7 +3791,7 @@ function blocksToNewAnnotations(pageNum, blocks) {
       id: genId(), type: 'text', text: b.text, x: b.x, y: b.y,
       color: b.color, fontSize: b.fontSize, fontFamily: b.fontFamily,
       bold: !!b.bold, italic: !!b.italic, underline: false, superscript: false, subscript: false,
-      align: b.align || 'left',
+      align: b.align || 'left', lineHeight: clampLineHeight(b.lineHeight),
       coverRect: { ...b.bbox }, coverColor: b.bgColor || '#ffffff',
       ...(b.annotId ? { replacesAnnotId: b.annotId } : {})
     });
@@ -3912,12 +4057,12 @@ function currentTextStyle() {
     return {
       color: sel.color, fontSize: sel.fontSize, fontFamily: sel.fontFamily || 'helvetica',
       bold: sel.bold !== false, italic: !!sel.italic, underline: !!sel.underline,
-      superscript: !!sel.superscript, subscript: !!sel.subscript, align: sel.align || 'left'
+      superscript: !!sel.superscript, subscript: !!sel.subscript, align: sel.align || 'left', lineHeight: lineHeightOf(sel)
     };
   }
   return {
     color: App.color, fontSize: App.fontSize, fontFamily: App.fontFamily, bold: App.bold, italic: App.italic,
-    underline: App.underline, superscript: App.superscript, subscript: App.subscript, align: App.align
+    underline: App.underline, superscript: App.superscript, subscript: App.subscript, align: App.align, lineHeight: clampLineHeight(App.lineHeight)
   };
 }
 // Superscript and subscript are mutually exclusive (like most word processors): turning one on
@@ -3944,6 +4089,7 @@ function applyTextStyle(patch) {
 }
 function syncTextStyleButtons() {
   const st = currentTextStyle();
+  lineSpaceValue.textContent = String(Math.round(clampLineHeight(st.lineHeight) * 100) / 100);
   document.querySelectorAll('#textStyleControls [data-font-family]').forEach((b) => {
     const on = b.dataset.fontFamily === st.fontFamily;
     b.classList.toggle('active', on); b.setAttribute('aria-pressed', on ? 'true' : 'false');
@@ -4689,6 +4835,16 @@ $('btnTextItalic').addEventListener('click', () => applyTextStyle({ italic: !cur
 $('btnTextUnderline').addEventListener('click', () => applyTextStyle({ underline: !currentTextStyle().underline }));
 $('btnTextSuperscript').addEventListener('click', () => toggleTextScript('superscript'));
 $('btnTextSubscript').addEventListener('click', () => toggleTextScript('subscript'));
+// Line spacing is one value for the whole box: walks the preset list one step at a time.
+function stepLineSpacing(dir) {
+  const cur = clampLineHeight(currentTextStyle().lineHeight);
+  const next = dir > 0
+    ? LINE_SPACING_STEPS.find((v) => v > cur + 0.001)
+    : [...LINE_SPACING_STEPS].reverse().find((v) => v < cur - 0.001);
+  if (next != null) applyTextStyle({ lineHeight: next });
+}
+$('btnLineSpaceDown').addEventListener('click', () => stepLineSpacing(-1));
+$('btnLineSpaceUp').addEventListener('click', () => stepLineSpacing(1));
 document.querySelectorAll('#textStyleControls [data-text-align]').forEach((btn) => {
   btn.addEventListener('click', () => applyTextStyle({ align: btn.dataset.textAlign }));
 });
