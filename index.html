@@ -1217,7 +1217,14 @@ function setCustomColorPickerValue(hex) { customColorPicker.value = hex; customC
 // the person leaving the box, so the editor's blur handler keeps it open for them instead of
 // committing and closing it. Focus is handed back once the interaction with the control ends.
 function isFormatControlEl(el) { return el === sizeSlider || el === customColorPicker; }
+// True from a pointerdown on the size slider / colour picker until the next pointerdown anywhere
+// else, so the editor's blur handler knows focus left it on purpose (see the blur handler).
+let formatControlHeld = false;
+document.addEventListener('pointerdown', (e) => {
+  formatControlHeld = e.target instanceof Element && !!e.target.closest('#sizeSlider, #customColorWrap');
+}, true);
 function returnFocusToEditor() {
+  formatControlHeld = false;
   if (activeTextEditor && activeTextEditor.refocus) activeTextEditor.refocus();
 }
 // The custom swatch represents "whatever colour isn't one of the presets", so it should show the
@@ -2490,9 +2497,16 @@ function onPointerDown(e) {
 
   if (App.sampling) {
     const hex = sampleColorAt(pageNum, e);
-    toggleSampling(false);
     if (hex) { setCustomColorPickerValue(hex); setColor(hex); showToast(`Picked ${hex.toUpperCase()}`); }
     else showToast('Could not read a color there — try again.');
+    if (activeTextEditor) {
+      // The browser's own focus shift for this click lands after this handler returns. Stay
+      // "sampling" until then so the editor's blur handler ignores it, then disarm and give the
+      // box its focus (and selection) back.
+      setTimeout(() => { toggleSampling(false); returnFocusToEditor(); }, 0);
+    } else {
+      toggleSampling(false);
+    }
     e.preventDefault();
     return;
   }
@@ -2646,8 +2660,8 @@ function closeTextEditor(commit) { if (activeTextEditor) activeTextEditor.finish
 // character offset so the rebuild is invisible. A style change (bold, color, ...) reads the live
 // text *selection*: a real selection gets the patch applied to just that stretch of runs — split
 // out of whatever runs it crosses — so formatting specific strings, Google-Slides style, never
-// touches the rest of the box; a plain caret with nothing selected falls back to the whole box,
-// same as it always has, since there's no specific text to narrow the change to.
+// touches the rest of the box; a plain caret with nothing selected leaves existing text alone and
+// stages the style (`pendingStyle`) for whatever gets typed next at that spot.
 function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
   closeTextEditor(true);
   const box = App.pageBoxes[pageNum];
@@ -2674,6 +2688,11 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
   const originalRuns = runs.map((r) => ({ ...r }));
   const originalAlign = align;
   const originalText = textFromRuns(originalRuns);
+  // Last selection / caret seen inside this editor, as character offsets. Clicking a toolbar
+  // control (size slider, colour picker, eyedropper, page canvas while sampling) can move the live
+  // DOM selection out of the box; style changes and refocus fall back to this so they still land
+  // on the text that was selected (or the caret spot) instead of the whole box or the end.
+  let savedSel = null;
 
   const editorEl = document.createElement('div');
   editorEl.className = 'text-editor';
@@ -2785,6 +2804,18 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
     if (start == null || end == null || start === end) return null;
     return { start: Math.min(start, end), end: Math.max(start, end) };
   }
+  // Live selection/caret inside the editor as {start,end} offsets (start === end for a caret).
+  function liveSelectionRange() {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return null;
+    const r = sel.getRangeAt(0);
+    if (!editorEl.contains(r.startContainer) || !editorEl.contains(r.endContainer)) return null;
+    const a = offsetOf(r.startContainer, r.startOffset), b = offsetOf(r.endContainer, r.endOffset);
+    if (a == null || b == null) return null;
+    return { start: Math.min(a, b), end: Math.max(a, b) };
+  }
+  // The selection style changes should act on: the live one, else the last one seen in the box.
+  function effectiveSelection() { return liveSelectionRange() || savedSel; }
   function runsSliceInRange(list, start, end) {
     let pos = 0; const out = [];
     for (const r of list) {
@@ -2833,6 +2864,7 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
       range.setStart(a.node, a.offset); range.setEnd(b.node, b.offset);
       const sel = window.getSelection();
       sel.removeAllRanges(); sel.addRange(range);
+      savedSel = { start: Math.min(start, end), end: Math.max(start, end) };
     } catch (e) { /* not worth failing the edit over a caret we couldn't place back exactly */ }
   }
   // Re-renders from `runs` into fresh spans and puts the caret back where it logically was —
@@ -2906,19 +2938,27 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
   const api = {
     getStyle() {
       syncRunsFromDom();
-      const selR = getEditorSelectionOffsets();
+      const cur = effectiveSelection();
+      const selR = cur && cur.start !== cur.end ? cur : null;
+      const caret = cur ? cur.start : null;
       if (!selR && pendingStyle) {
-        const caret = getCaretOffset();
         if (caret === pendingStyleOffset) return { ...styleAtOffset(caret), ...pendingStyle, align };
         pendingStyle = null; pendingStyleOffset = null;
       }
-      const source = selR ? runsSliceInRange(runs, selR.start, selR.end) : runs;
-      return { ...aggregateRunStyle(source.length ? source : [currentDefaultStyle()]), align };
+      if (selR) {
+        const slice = runsSliceInRange(runs, selR.start, selR.end);
+        return { ...aggregateRunStyle(slice.length ? slice : [currentDefaultStyle()]), align };
+      }
+      // A bare caret reports the style of the character just before it, so the toolbar follows
+      // the caret around the box instead of averaging the whole thing.
+      if (caret != null) return { ...styleAtOffset(caret), align };
+      return { ...aggregateRunStyle(runs.length ? runs : [currentDefaultStyle()]), align };
     },
     setStyle(patch) {
       if (Object.prototype.hasOwnProperty.call(patch, 'align')) { align = patch.align; fit(); return; }
       syncRunsFromDom();
-      const selR = getEditorSelectionOffsets();
+      const cur = effectiveSelection();
+      const selR = cur && cur.start !== cur.end ? cur : null;
       if (selR) {
         runs = applyPatchToRange(runs, selR.start, selR.end, patch);
         renderRuns();
@@ -2927,23 +2967,23 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
       } else {
         // Nothing selected: stage the style for whatever gets typed next at this exact spot,
         // rather than touching text that's already there.
-        const caret = getCaretOffset();
+        const caret = cur ? cur.start : textFromRuns(runs).length;
         const base = (pendingStyle && pendingStyleOffset === caret) ? { ...styleAtOffset(caret), ...pendingStyle } : styleAtOffset(caret);
         pendingStyle = { ...base, ...patch };
         pendingStyleOffset = caret;
       }
       fit();
     },
-    // Called by a format control (size slider, custom color picker) once the person is done
-    // interacting with it, to hand keyboard focus back to the box they were editing.
+    // Called by a format control (size slider, custom color picker, eyedropper) once the person is
+    // done with it, to hand keyboard focus back to the box — with the same selection / caret they
+    // had before, not the start or end of the text.
     refocus() {
       if (done) return;
+      const total = textFromRuns(runs).length;
+      const want = savedSel || { start: total, end: total };
       editorEl.focus();
-      const sel = window.getSelection();
-      if (!sel || !sel.rangeCount || !editorEl.contains(sel.getRangeAt(0).commonAncestorContainer)) {
-        const total = textFromRuns(runs).length;
-        restoreSelection(total, total);
-      }
+      const now = liveSelectionRange();
+      if (!now || now.start !== want.start || now.end !== want.end) restoreSelection(want.start, want.end);
     },
     finish(commit) {
       if (done) return;
@@ -3024,6 +3064,7 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
     if (done) return;
     const sel = window.getSelection();
     if (!sel || !sel.rangeCount || !editorEl.contains(sel.getRangeAt(0).commonAncestorContainer)) return;
+    savedSel = liveSelectionRange() || savedSel;
     if (pendingStyle) {
       const caret = getCaretOffset();
       const selR = getEditorSelectionOffsets();
@@ -3068,12 +3109,20 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
       else api.finish(true);
       return;
     }
-    if (e.key === 'Escape') { e.preventDefault(); api.finish(false); }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (App.sampling) { toggleSampling(false); return; }   // Esc backs out of the eyedropper before it discards the edit
+      api.finish(false);
+    }
   });
   editorEl.addEventListener('blur', (e) => {
-    // Clicking a format control (font-size slider, custom color picker) steals focus to apply
-    // itself — that's not the person leaving the box, so keep the editor mounted and let the
-    // control's own handler call back in through `api`; focus returns once they're done with it.
+    // Interacting with a format control (dragging the size slider, opening the native colour
+    // picker) or the armed eyedropper steals focus to do its job — that's not the person leaving
+    // the box, so keep the editor mounted; the control hands focus back (`refocus`) when it's done.
+    // relatedTarget alone isn't reliable (Safari/Firefox often report null for these), so a
+    // pointerdown on the control is tracked too.
+    if (done) return;
+    if (formatControlHeld || App.sampling) return;
     if (e.relatedTarget && isFormatControlEl(e.relatedTarget)) return;
     api.finish(true);
   });
@@ -4621,6 +4670,7 @@ viewportEl.addEventListener('scroll', closeContextMenu, { passive: true });
 // Preventing the mousedown's default focus-shift keeps the textarea focused; the click still fires.
 function preventFocusSteal(el) { el.addEventListener('mousedown', (e) => e.preventDefault()); }
 document.querySelectorAll('#colorPalette .swatch, #textStyleControls button').forEach(preventFocusSteal);
+preventFocusSteal(btnEyedrop);   // arming the eyedropper mid-edit must not blur (and so close) the text editor
 
 document.querySelectorAll('#colorPalette .swatch').forEach((btn) => btn.addEventListener('click', () => {
   App.styleEditOpen = false;
@@ -4659,6 +4709,7 @@ sizeSlider.addEventListener('input', (e) => {
   else App.strokeWidth = v;
 });
 sizeSlider.addEventListener('change', () => { App.styleEditOpen = false; returnFocusToEditor(); });
+sizeSlider.addEventListener('pointerup', returnFocusToEditor);
 opacitySlider.addEventListener('input', (e) => {
   const v = +e.target.value;
   opacityValueLabel.textContent = `${v}%`;
