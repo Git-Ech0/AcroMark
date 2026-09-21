@@ -1212,6 +1212,14 @@ const customColorWrap = $('customColorWrap');
 // Keeps the native <input type="color"> in sync for when the OS picker opens, and paints the
 // visible chip via plain background-color so it's never subject to the widget's own theming.
 function setCustomColorPickerValue(hex) { customColorPicker.value = hex; customColorSwatch.style.background = hex; }
+// Controls that legitimately steal keyboard focus away from an open text editor to do their job
+// (dragging the size slider, opening the native color picker) — losing focus to one of these isn't
+// the person leaving the box, so the editor's blur handler keeps it open for them instead of
+// committing and closing it. Focus is handed back once the interaction with the control ends.
+function isFormatControlEl(el) { return el === sizeSlider || el === customColorPicker; }
+function returnFocusToEditor() {
+  if (activeTextEditor && activeTextEditor.refocus) activeTextEditor.refocus();
+}
 // The custom swatch represents "whatever colour isn't one of the presets", so it should show the
 // active ring exactly when the current colour doesn't match any preset button — otherwise a
 // custom colour leaves the whole bar looking unselected even though it's the one drawing.
@@ -2705,6 +2713,20 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
     const src = runs[0] || { color: App.color, fontSize: App.fontSize, fontFamily: App.fontFamily, bold: App.bold, italic: App.italic, underline: App.underline, superscript: App.superscript, subscript: App.subscript };
     return { color: src.color, fontSize: src.fontSize, fontFamily: src.fontFamily, bold: src.bold, italic: src.italic, underline: src.underline, superscript: src.superscript, subscript: src.subscript };
   }
+  // The style a caret at `offset` (nothing selected) should be considered "in" — i.e. the style of
+  // the character immediately before it, so a style choice made there reads as "off" or "on" the
+  // way the surrounding text already looks, and continuing to type there continues that look.
+  function styleAtOffset(offset) {
+    if (!runs.length) return currentDefaultStyle();
+    let pos = 0;
+    for (const r of runs) {
+      pos += r.text.length;
+      if (offset <= pos) {
+        return { color: r.color, fontSize: r.fontSize, fontFamily: r.fontFamily, bold: r.bold, italic: r.italic, underline: r.underline, superscript: r.superscript, subscript: r.subscript };
+      }
+    }
+    return currentDefaultStyle();
+  }
   function syncRunsFromDom() {
     const collected = [];
     const walk = (el) => {
@@ -2730,23 +2752,20 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
     walk(editorEl);
     runs = normalizeRuns(collected.map((r) => ({ ...r, text: r.text.replace(/\u00A0/g, ' ') })));
   }
-  // Character offset (into the plain concatenated text) of a DOM (node, offset) position.
+  // Character offset (into the plain concatenated text) of a DOM (node, offset) position. Building
+  // a real Range from the start of the editor up to that boundary and reading its text length
+  // handles every boundary shape uniformly — including a boundary sitting directly on editorEl
+  // itself (as Ctrl+A / the auto-select-all on reopening a box produce), where `offset` is a
+  // *child-node index*, not a character count, and so can't just be read off directly.
   function offsetOf(node, nodeOffset) {
-    if (node === editorEl) return Math.min(nodeOffset, textFromRuns(runs).length);
-    let total = 0, found = null;
-    const walk = (el) => {
-      for (const child of el.childNodes) {
-        if (found != null) return;
-        if (child === node) { found = total + nodeOffset; return; }
-        if (child.nodeType === Node.TEXT_NODE) total += child.textContent.length;
-        else if (child.nodeType === Node.ELEMENT_NODE) {
-          if (child.contains(node)) { walk(child); return; }
-          total += child.textContent.length;
-        }
-      }
-    };
-    walk(editorEl);
-    return found;
+    try {
+      const r = document.createRange();
+      r.setStart(editorEl, 0);
+      r.setEnd(node, nodeOffset);
+      return r.toString().replace(/\u00A0/g, ' ').length;
+    } catch (e) {
+      return null;
+    }
   }
   function getCaretOffset() {
     const sel = window.getSelection();
@@ -2875,10 +2894,24 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
   });
 
   let done = false, composing = false;
+  // A style choice made with just a blinking caret (nothing selected) doesn't touch existing text —
+  // Google Slides style, it's staged here and lands on the next characters actually typed at that
+  // spot. It lapses (is dropped) the moment the caret moves without anything being typed.
+  let pendingStyle = null;
+  let pendingStyleOffset = null;
+  // Caret offset captured right before a browser-driven text insertion (typed key, paste, IME
+  // commit), so the 'input' handler can tell exactly which stretch of the now-changed text is the
+  // newly inserted part and confine a pending style to just that.
+  let preInputCaret = null;
   const api = {
     getStyle() {
       syncRunsFromDom();
       const selR = getEditorSelectionOffsets();
+      if (!selR && pendingStyle) {
+        const caret = getCaretOffset();
+        if (caret === pendingStyleOffset) return { ...styleAtOffset(caret), ...pendingStyle, align };
+        pendingStyle = null; pendingStyleOffset = null;
+      }
       const source = selR ? runsSliceInRange(runs, selR.start, selR.end) : runs;
       return { ...aggregateRunStyle(source.length ? source : [currentDefaultStyle()]), align };
     },
@@ -2890,22 +2923,32 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
         runs = applyPatchToRange(runs, selR.start, selR.end, patch);
         renderRuns();
         restoreSelection(selR.start, selR.end);
+        pendingStyle = null; pendingStyleOffset = null;
       } else {
-        const patched = runs.map((r) => ({ ...r, ...patch }));
-        const merged = normalizeRuns(patched);
-        // Nothing selected restyles the whole box, same as before — but if the box is entirely
-        // empty, normalizing would drop the (empty) placeholder run and the toggle would silently
-        // do nothing, so keep one empty run alive to carry the style forward to the first keystroke.
-        runs = merged.length ? merged : [{ text: '', ...currentDefaultStyle(), ...patch }];
-        renderRuns();
+        // Nothing selected: stage the style for whatever gets typed next at this exact spot,
+        // rather than touching text that's already there.
+        const caret = getCaretOffset();
+        const base = (pendingStyle && pendingStyleOffset === caret) ? { ...styleAtOffset(caret), ...pendingStyle } : styleAtOffset(caret);
+        pendingStyle = { ...base, ...patch };
+        pendingStyleOffset = caret;
+      }
+      fit();
+    },
+    // Called by a format control (size slider, custom color picker) once the person is done
+    // interacting with it, to hand keyboard focus back to the box they were editing.
+    refocus() {
+      if (done) return;
+      editorEl.focus();
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount || !editorEl.contains(sel.getRangeAt(0).commonAncestorContainer)) {
         const total = textFromRuns(runs).length;
         restoreSelection(total, total);
       }
-      fit();
     },
     finish(commit) {
       if (done) return;
       done = true; activeTextEditor = null;
+      document.removeEventListener('selectionchange', onDocSelectionChange);
       syncRunsFromDom();
       editorEl.remove();
       if (!commit) return;
@@ -2955,14 +2998,50 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
     }
   };
   activeTextEditor = api;
-  editorEl.addEventListener('compositionstart', () => { composing = true; });
-  editorEl.addEventListener('compositionend', () => { composing = false; resyncAndRerender(); });
-  editorEl.addEventListener('input', () => { if (!composing) resyncAndRerender(); });
+  // Applies a still-pending style to whatever text just landed between the caret positions
+  // recorded before/after a browser-driven insertion, then falls back to the ordinary rebuild.
+  function finalizeAfterEdit() {
+    if (pendingStyle && preInputCaret != null) {
+      const afterCaret = getCaretOffset();
+      if (afterCaret != null && afterCaret > preInputCaret) {
+        syncRunsFromDom();
+        runs = applyPatchToRange(runs, preInputCaret, afterCaret, pendingStyle);
+        renderRuns();
+        restoreSelection(afterCaret, afterCaret);
+        pendingStyle = null; pendingStyleOffset = null; preInputCaret = null;
+        fit();
+        syncTextStyleButtons();
+        return;
+      }
+    }
+    preInputCaret = null;
+    resyncAndRerender();
+  }
+  // Caret/selection changes anywhere in the document — filtered down to ones inside this editor —
+  // are how the toolbar stays live as you click or arrow around, and how a staged style lapses the
+  // moment you move off the spot it was staged at without typing anything there.
+  function onDocSelectionChange() {
+    if (done) return;
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount || !editorEl.contains(sel.getRangeAt(0).commonAncestorContainer)) return;
+    if (pendingStyle) {
+      const caret = getCaretOffset();
+      const selR = getEditorSelectionOffsets();
+      if (selR || caret !== pendingStyleOffset) { pendingStyle = null; pendingStyleOffset = null; }
+    }
+    refreshControls();
+  }
+  document.addEventListener('selectionchange', onDocSelectionChange);
+  editorEl.addEventListener('compositionstart', () => { composing = true; preInputCaret = pendingStyle ? getCaretOffset() : null; });
+  editorEl.addEventListener('compositionend', () => { composing = false; finalizeAfterEdit(); });
+  editorEl.addEventListener('beforeinput', () => { if (!composing && pendingStyle) preInputCaret = getCaretOffset(); });
+  editorEl.addEventListener('input', () => { if (!composing) finalizeAfterEdit(); });
   editorEl.addEventListener('paste', (e) => {
     e.preventDefault();
     const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+    if (pendingStyle) preInputCaret = getCaretOffset();
     if (text) document.execCommand('insertText', false, text);
-    resyncAndRerender();
+    finalizeAfterEdit();
   });
   editorEl.addEventListener('keydown', (e) => {
     e.stopPropagation();
@@ -2981,13 +3060,23 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
     }
     if (e.key === 'Enter') {
       e.preventDefault();
-      if (e.shiftKey) { document.execCommand('insertText', false, '\n'); resyncAndRerender(); }
+      if (e.shiftKey) {
+        if (pendingStyle) preInputCaret = getCaretOffset();
+        document.execCommand('insertText', false, '\n');
+        finalizeAfterEdit();
+      }
       else api.finish(true);
       return;
     }
     if (e.key === 'Escape') { e.preventDefault(); api.finish(false); }
   });
-  editorEl.addEventListener('blur', () => api.finish(true));
+  editorEl.addEventListener('blur', (e) => {
+    // Clicking a format control (font-size slider, custom color picker) steals focus to apply
+    // itself — that's not the person leaving the box, so keep the editor mounted and let the
+    // control's own handler call back in through `api`; focus returns once they're done with it.
+    if (e.relatedTarget && isFormatControlEl(e.relatedTarget)) return;
+    api.finish(true);
+  });
   refreshControls();
 }
 
@@ -4539,7 +4628,7 @@ document.querySelectorAll('#colorPalette .swatch').forEach((btn) => btn.addEvent
   setColor(btn.dataset.color);
 }));
 $('customColorPicker').addEventListener('input', (e) => { customColorSwatch.style.background = e.target.value; setColor(e.target.value); });
-$('customColorPicker').addEventListener('change', () => { App.styleEditOpen = false; });
+$('customColorPicker').addEventListener('change', () => { App.styleEditOpen = false; returnFocusToEditor(); });
 btnEyedrop.addEventListener('click', () => toggleSampling());
 
 document.querySelectorAll('#textStyleControls [data-font-family]').forEach((btn) => {
@@ -4569,7 +4658,7 @@ sizeSlider.addEventListener('input', (e) => {
   else if (App.activeTool === 'highlighter') App.highlighterWidth = v;
   else App.strokeWidth = v;
 });
-sizeSlider.addEventListener('change', () => { App.styleEditOpen = false; });
+sizeSlider.addEventListener('change', () => { App.styleEditOpen = false; returnFocusToEditor(); });
 opacitySlider.addEventListener('input', (e) => {
   const v = +e.target.value;
   opacityValueLabel.textContent = `${v}%`;
