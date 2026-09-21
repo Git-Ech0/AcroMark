@@ -184,14 +184,13 @@
     .comment-pin.pulse .pin-body { transform: rotate(-45deg) scale(1.35); }
 
     /* ---------- inline text editor ----------
-       Deliberately bare: no fill, no placeholder text, no drop shadow, no rounded "widget" look —
-       just a thin dashed outline in the same accent colour/dash pattern as a selected shape's
-       selection ring (see drawSelectionOverlay), so an in-progress text edit reads as "this box is
-       selected" and nothing more. The page underneath (or the sensed PDF text) stays fully visible
-       until the user actually types something different. */
+       No border, no fill, no padding, no drop shadow — nothing that would make this read as a
+       separate popup/overlay sitting on top of the page. It's positioned exactly where the
+       annotation itself sits (or will sit), at the same font/size/colour, so typing looks like
+       editing the page directly. The only visible cue you're in edit mode is the blinking caret. */
     .text-editor {
-      position: absolute; z-index: 30; padding: 1px 2px; border: 1.5px dashed rgb(var(--accent) / 0.85);
-      background: transparent; resize: none; overflow: hidden;
+      position: absolute; z-index: 30; padding: 0; margin: 0; border: 0;
+      background: transparent; resize: none; overflow: visible;
       white-space: pre; outline: none; box-shadow: none; caret-color: rgb(var(--accent));
     }
 
@@ -2722,9 +2721,9 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
   editorEl.contentEditable = 'true';
   editorEl.spellcheck = false;
   editorEl.setAttribute('aria-label', 'Text annotation');
-  // shift left by the thin dashed border + minimal padding, so typed text starts exactly at
-  // the placed (or sensed) document x — see the "inline text editor" CSS for those numbers.
-  editorEl.style.left = `${at.x * App.scale - 3.5}px`;
+  // No border/padding on the editor (see the "inline text editor" CSS), so its own left edge
+  // already sits exactly at the placed (or sensed) document x — nothing to compensate for.
+  editorEl.style.left = `${at.x * App.scale}px`;
   editorEl.style.lineHeight = String(lineHeight);
 
   function renderEditorSpan(run) {
@@ -2971,7 +2970,7 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
     editorEl.style.lineHeight = String(lineHeight);
     // align the editor's first baseline with where the annotation will be drawn (including the
     // raised/dropped baseline while the first run's superscript/subscript is on)
-    editorEl.style.top = `${at.y * App.scale + shiftPx - 2.5 - fontPx * (0.97 + (lineHeight - LINE_H) / 2)}px`;   // half-leading grows with line-height; keep the first baseline pinned
+    editorEl.style.top = `${at.y * App.scale + shiftPx - fontPx * (0.97 + (lineHeight - LINE_H) / 2)}px`;   // half-leading grows with line-height; keep the first baseline pinned
     editorEl.style.width = `${Math.max(40, maxW + 6)}px`;
     let totalH = 0;
     lines.forEach((pieces) => {
