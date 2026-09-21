@@ -1174,6 +1174,9 @@ const App = {
 
   gesture: null,                       // in-progress pointer interaction
   selected: null,                      // {pageNum, id}
+  editingAnnotation: null,             // {pageNum, id} of a text annotation whose inline DOM editor is
+                                        // currently open — its own canvas text is skipped while this is
+                                        // set, since the live editor is now the only thing showing it
   selDrag: null,                       // {mode, start, orig, moved}
   hover: null,                         // {pageNum, id} of an unselected shape under the pointer (Select tool)
   styleEditOpen: false,
@@ -1675,6 +1678,10 @@ function drawAnnotation(ctx, a, s, pageNum) {
         ctx.fillRect(Math.min(r.x1, r.x2) * s, Math.min(r.y1, r.y2) * s, Math.abs(r.x2 - r.x1) * s, Math.abs(r.y2 - r.y1) * s);
         ctx.restore();
       }
+      // The live DOM editor (see openTextEditor) is the only thing that should show this
+      // annotation's text while it's actively being typed into — drawing it here too would
+      // stack a second, independently-positioned copy of the same text underneath it.
+      if (App.editingAnnotation && App.editingAnnotation.pageNum === pageNum && App.editingAnnotation.id === a.id) break;
       ctx.textBaseline = 'alphabetic';
       const m = measureTextLines(a);
       const align = a.align || 'left';
@@ -2146,7 +2153,10 @@ function redrawPageAnnotations(n) {
     if (bb) drawBoxOutline(ctx, bb);
   }
   const sel = getSelectionGeometry(n);
-  if (sel) drawSelectionOverlay(ctx, sel);
+  // While actively typing into a text box, the selection box + delete badge stay hidden — the
+  // box only reappears once you click away and it goes back to being merely "selected".
+  const beingEdited = App.editingAnnotation && App.editingAnnotation.pageNum === n && sel && App.editingAnnotation.id === sel.a.id;
+  if (sel && !beingEdited) drawSelectionOverlay(ctx, sel);
 }
 function fullRedrawAllPages() {
   Object.keys(App.annotCanvases).forEach((n) => redrawPageAnnotations(+n));
@@ -2685,6 +2695,9 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
   const box = App.pageBoxes[pageNum];
   if (!box) return;
   const at = existing ? { x: existing.x, y: existing.y } : sensedBlock ? { x: sensedBlock.x, y: sensedBlock.y } : pdfPos;
+  // Hide the annotation's own canvas-drawn text for as long as its editor is open — from this
+  // point on the DOM editor below is the only rendering of it on screen.
+  if (existing) { App.editingAnnotation = { pageNum, id: existing.id }; requestRedraw(pageNum); }
 
   // local, uncommitted model — content and every run's style preview live here and only land on
   // the real annotation when we commit below, exactly like before (Escape discards it all).
@@ -2981,6 +2994,26 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
     editorEl.style.height = `${totalH + 6}px`;
   };
 
+  // A sensed block is real PDF page content, not an annotation — there's nothing in
+  // App.pageAnnotations to hide the way editingAnnotation hides an existing text box above. Patch
+  // over it with a plain div the moment editing starts (matching the same bbox/colour the
+  // permanent coverRect will use on commit) so the original glyphs don't peek out from behind the
+  // transparent, live-sized editor while you type.
+  let coverEl = null;
+  if (sensedBlock) {
+    coverEl = document.createElement('div');
+    coverEl.style.position = 'absolute';
+    coverEl.style.zIndex = '29';
+    coverEl.style.pointerEvents = 'none';
+    coverEl.style.background = HEX_RE.test(sensedBlock.bgColor) ? sensedBlock.bgColor : '#ffffff';
+    const bb = sensedBlock.bbox;
+    coverEl.style.left = `${bb.x1 * App.scale}px`;
+    coverEl.style.top = `${bb.y1 * App.scale}px`;
+    coverEl.style.width = `${Math.max(0, (bb.x2 - bb.x1) * App.scale)}px`;
+    coverEl.style.height = `${Math.max(0, (bb.y2 - bb.y1) * App.scale)}px`;
+    box.appendChild(coverEl);
+  }
+
   renderRuns();
   fit();
   box.appendChild(editorEl);
@@ -3060,6 +3093,8 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
       document.removeEventListener('selectionchange', onDocSelectionChange);
       syncRunsFromDom();
       editorEl.remove();
+      if (coverEl) coverEl.remove();
+      if (existing) { App.editingAnnotation = null; requestRedraw(pageNum); }
       if (!commit) return;
       const normalized = normalizeRuns(runs);
       const full = textFromRuns(normalized);
