@@ -2628,6 +2628,11 @@ function onPointerDown(e) {
     for (let i = list.length - 1; i >= 0; i--) {
       if (list[i].type === 'text' && hitTestAnnotation(list[i], p, App.scale)) { openTextEditor(pageNum, null, list[i]); return; }
     }
+    // A box is currently open — this click's job is just to close it (same as Escape), not also
+    // plant a brand new box at the click point. A second click, with nothing left open, is what
+    // actually creates one — so a stray click-away never costs you an accidental empty text box,
+    // and undo history stays exactly where you'd expect it right after.
+    if (activeTextEditor) { closeTextEditor(true); viewportEl.focus({ preventScroll: true }); return; }
     openTextEditor(pageNum, p, null);
   } else if (tool === 'sense') {
     handleSenseClick(pageNum, pos);
@@ -3250,6 +3255,15 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
   editorEl.addEventListener('keydown', (e) => {
     e.stopPropagation();
     const mod = e.ctrlKey || e.metaKey;
+    // Undo/redo work from inside an open text box exactly like everywhere else in the app — no
+    // need to hit Escape first. undo()/redo() already commit whatever's been typed before acting
+    // (same as clicking away does), so calling them straight from here is safe. Respects whatever
+    // keybindings the person has customised, same as the app-wide shortcut handler does.
+    if (mod && !e.altKey) {
+      const key = e.key.toLowerCase();
+      if (matchesBinding(key, mod, e.shiftKey, App.keymap.undo)) { e.preventDefault(); undo(); return; }
+      if (matchesBinding(key, mod, e.shiftKey, App.keymap.redo) || key === 'y') { e.preventDefault(); redo(); return; }
+    }
     if (mod && !e.shiftKey && !e.altKey) {
       const k = e.key.toLowerCase();
       if (k === 'b') { e.preventDefault(); api.setStyle({ bold: !api.getStyle().bold }); syncTextStyleButtons(); return; }
