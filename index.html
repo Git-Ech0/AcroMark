@@ -1392,6 +1392,7 @@ if (window.pdfjsLib) {
 }
 
 const App = {
+  activeTab: 'pdf',
   pdfDoc: null, pdfBytes: null, numPages: 0,
   currentFileName: null, currentFileSize: 0, fileKey: null, docGen: 0,
   pageSizes: {},                       // n -> {w,h} at scale 1 (rotation + crop box applied)
@@ -1970,19 +1971,18 @@ function drawAnnotation(ctx, a, s, pageNum) {
         const r = a.coverRect;
         const rx = Math.min(r.x1, r.x2) * s, ry = Math.min(r.y1, r.y2) * s;
         const rw = Math.abs(r.x2 - r.x1) * s, rh = Math.abs(r.y2 - r.y1) * s;
+        let erased = false;
         if (a.eraseImage) {
-          // The real patch: original page pixels with just the glyph ink painted over using
-          // colour borrowed from the background around them — see buildEraseImage. If it hasn't
-          // finished decoding yet, draw nothing this frame rather than a wrong-coloured guess;
-          // the image's onload triggers a redraw the moment it's ready.
           const img = getCachedEraseImage(a, pageNum);
-          if (img.complete && img.naturalWidth) ctx.drawImage(img, rx, ry, rw, rh);
-        } else if (a.coverColor) {
-          // Only reached for an older project file saved before real erasure existed, or the rare
-          // case the page pixels couldn't be sampled — a flat fill is better than nothing here,
-          // but it's a fallback, never the default.
+          if (img.complete && img.naturalWidth) {
+            ctx.drawImage(img, rx, ry, rw, rh);
+            erased = true;
+          }
+        }
+        if (!erased) {
+          // Fallback solid cover so old PDF text is NEVER visible or duplicated underneath!
           ctx.save();
-          ctx.fillStyle = HEX_RE.test(a.coverColor) ? a.coverColor : '#ffffff';
+          ctx.fillStyle = (a.coverColor && HEX_RE.test(a.coverColor)) ? a.coverColor : '#ffffff';
           ctx.fillRect(rx, ry, rw, rh);
           ctx.restore();
         }
@@ -2101,6 +2101,24 @@ function textMetrics(a) {
   const m = measureTextLines(a);
   return { w: m.maxW, h: m.totalH, lineCount: m.lines.length };
 }
+function rectsIntersect(r1, r2) {
+  return !(r1.x2 < r2.x1 || r1.x1 > r2.x2 || r1.y2 < r2.y1 || r1.y1 > r2.y2);
+}
+function drawMarqueeBox(ctx, p1, p2, s) {
+  const x = Math.min(p1.x, p2.x) * s;
+  const y = Math.min(p1.y, p2.y) * s;
+  const w = Math.abs(p2.x - p1.x) * s;
+  const h = Math.abs(p2.y - p1.y) * s;
+  if (w <= 0.5 && h <= 0.5) return;
+  ctx.save();
+  ctx.fillStyle = 'rgba(211, 146, 60, 0.12)';
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = 'rgba(211, 146, 60, 0.9)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([5, 4]);
+  ctx.strokeRect(x, y, w, h);
+  ctx.restore();
+}
 function getAnnotationBBox(a) {
   switch (a.type) {
     case 'pen':
@@ -2200,7 +2218,23 @@ function hitTestAnnotation(a, p, scale) {
 }
 function findAnnotation(pageNum, id) { return (App.pageAnnotations[pageNum] || []).find((a) => a.id === id); }
 function removeAnnotationById(pageNum, id) { App.pageAnnotations[pageNum] = (App.pageAnnotations[pageNum] || []).filter((a) => a.id !== id); }
-function getSelectedAnnotation() { return App.selected ? findAnnotation(App.selected.pageNum, App.selected.id) || null : null; }
+function getSelectedAnnotations() {
+  if (!App.selected) return [];
+  const list = App.pageAnnotations[App.selected.pageNum] || [];
+  if (Array.isArray(App.selected.ids) && App.selected.ids.length > 0) {
+    const idSet = new Set(App.selected.ids);
+    return list.filter((a) => idSet.has(a.id));
+  }
+  if (App.selected.id) {
+    const a = list.find((x) => x.id === App.selected.id);
+    return a ? [a] : [];
+  }
+  return [];
+}
+function getSelectedAnnotation() {
+  const all = getSelectedAnnotations();
+  return all.length ? all[0] : null;
+}
 
 // =======================================================================
 // SELECTION (move / resize / delete)
@@ -2216,37 +2250,79 @@ function setSelected(sel) {
 }
 function getSelectionGeometry(pageNum) {
   if (!App.selected || App.selected.pageNum !== pageNum) return null;
-  const a = findAnnotation(pageNum, App.selected.id);
-  if (!a) return null;
+  const items = getSelectedAnnotations();
+  if (!items.length) return null;
+  const size = pageCssSize(pageNum);
+  if (items.length > 1) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const itemRects = [];
+    for (const it of items) {
+      const bb = getAnnotationBBox(it);
+      const p1 = toCanvasSpace({ x: bb.x1, y: bb.y1 }), p2 = toCanvasSpace({ x: bb.x2, y: bb.y2 });
+      const ir = { x1: Math.min(p1.x, p2.x), y1: Math.min(p1.y, p2.y), x2: Math.max(p1.x, p2.x), y2: Math.max(p1.y, p2.y) };
+      itemRects.push(ir);
+      minX = Math.min(minX, ir.x1); minY = Math.min(minY, ir.y1);
+      maxX = Math.max(maxX, ir.x2); maxY = Math.max(maxY, ir.y2);
+    }
+    const rect = { x1: minX, y1: minY, x2: maxX, y2: maxY };
+    const badge = { cx: clamp(rect.x2, 12, size.w - 12), cy: clamp(rect.y1, 12, size.h - 12), r: 10 };
+    return { isMulti: true, items, itemRects, rect, badge, handles: [] };
+  }
+  const a = items[0];
   const bb = getAnnotationBBox(a);
   const p1 = toCanvasSpace({ x: bb.x1, y: bb.y1 }), p2 = toCanvasSpace({ x: bb.x2, y: bb.y2 });
   const rect = { x1: Math.min(p1.x, p2.x), y1: Math.min(p1.y, p2.y), x2: Math.max(p1.x, p2.x), y2: Math.max(p1.y, p2.y) };
-  const size = pageCssSize(pageNum);
   const badge = { cx: clamp(rect.x2, 12, size.w - 12), cy: clamp(rect.y1, 12, size.h - 12), r: 10 };
   let handles = [];
   if (a.type === 'curve') {
-    // Three freely-draggable points: both endpoints, plus the point the curve bends through.
     const h1 = toCanvasSpace({ x: a.x1, y: a.y1 }), h2 = toCanvasSpace({ x: a.x2, y: a.y2 }), h3 = toCanvasSpace({ x: a.cx, y: a.cy });
     handles = [{ id: 'p1', x: h1.x, y: h1.y }, { id: 'p2', x: h2.x, y: h2.y }, { id: 'p3', x: h3.x, y: h3.y }];
   } else if (DIRECTIONAL_SHAPE_TYPES.has(a.type) || BOX_SHAPE_TYPES.has(a.type)) {
-    // Both defining corners/endpoints are independent, freely-draggable points — dragging either
-    // one repositions and resizes the shape around the other, which stays put.
     const h1 = toCanvasSpace({ x: a.x1, y: a.y1 }), h2 = toCanvasSpace({ x: a.x2, y: a.y2 });
     handles = [{ id: 'p1', x: h1.x, y: h1.y }, { id: 'p2', x: h2.x, y: h2.y }];
   } else if (a.type === 'image' || a.type === 'whiteboard') {
-    handles = [{ id: 'corner', x: rect.x2, y: rect.y2 }];   // aspect-locked, so only the one handle
+    handles = [{ id: 'corner', x: rect.x2, y: rect.y2 }];
   }
   return { a, rect, badge, handles };
 }
 function drawSelectionOverlay(ctx, sel) {
   ctx.save();
-  ctx.strokeStyle = themeRGB('ink-400'); ctx.setLineDash([6, 4]); ctx.lineWidth = 1.5;
-  ctx.strokeRect(sel.rect.x1, sel.rect.y1, sel.rect.x2 - sel.rect.x1, sel.rect.y2 - sel.rect.y1);
-  ctx.setLineDash([]);
-  sel.handles.forEach((h) => {
-    ctx.beginPath(); ctx.arc(h.x, h.y, 5.5, 0, Math.PI * 2);
-    ctx.fillStyle = themeRGB('ink-400'); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
-  });
+  if (sel.isMulti) {
+    ctx.strokeStyle = 'rgba(211, 146, 60, 0.45)';
+    ctx.setLineDash([4, 3]);
+    ctx.lineWidth = 1;
+    sel.itemRects.forEach((r) => {
+      ctx.strokeRect(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1);
+    });
+    ctx.strokeStyle = themeRGB('ink-400');
+    ctx.setLineDash([6, 4]);
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(sel.rect.x1, sel.rect.y1, sel.rect.x2 - sel.rect.x1, sel.rect.y2 - sel.rect.y1);
+    ctx.setLineDash([]);
+    const countStr = `${sel.items.length} items`;
+    ctx.font = '600 11px system-ui, sans-serif';
+    const tw = ctx.measureText(countStr).width;
+    const bx = sel.rect.x1, by = Math.max(4, sel.rect.y1 - 20);
+    ctx.fillStyle = themeRGB('ink-400');
+    if (ctx.roundRect) {
+      ctx.beginPath();
+      ctx.roundRect(bx, by, tw + 10, 16, 4);
+      ctx.fill();
+    } else {
+      ctx.fillRect(bx, by, tw + 10, 16);
+    }
+    ctx.fillStyle = '#fff';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(countStr, bx + 5, by + 8);
+  } else {
+    ctx.strokeStyle = themeRGB('ink-400'); ctx.setLineDash([6, 4]); ctx.lineWidth = 1.5;
+    ctx.strokeRect(sel.rect.x1, sel.rect.y1, sel.rect.x2 - sel.rect.x1, sel.rect.y2 - sel.rect.y1);
+    ctx.setLineDash([]);
+    sel.handles.forEach((h) => {
+      ctx.beginPath(); ctx.arc(h.x, h.y, 5.5, 0, Math.PI * 2);
+      ctx.fillStyle = themeRGB('ink-400'); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+    });
+  }
   ctx.beginPath(); ctx.arc(sel.badge.cx, sel.badge.cy, sel.badge.r, 0, Math.PI * 2);
   ctx.fillStyle = themeRGB('danger'); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
   ctx.fillStyle = '#fff'; ctx.font = '700 13px Arial, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -2285,36 +2361,41 @@ function applyTranslatedGeometry(a, orig, dx, dy) {
 }
 function deleteSelectedAnnotation() {
   if (!App.selected) return;
-  const { pageNum, id } = App.selected;
+  const { pageNum } = App.selected;
+  const items = getSelectedAnnotations();
+  if (!items.length) return;
   pushHistory();
-  removeAnnotationById(pageNum, id);
+  const idSet = new Set(items.map((x) => x.id));
+  App.pageAnnotations[pageNum] = (App.pageAnnotations[pageNum] || []).filter((a) => !idSet.has(a.id));
   setSelected(null);
   scheduleAutosave();
 }
 // Clones the selected mark a few pixels down-right so the copy is visible as its own item,
 // selects the copy, and leaves the original untouched.
 function duplicateSelectedAnnotation() {
-  const a = getSelectedAnnotation();
-  if (!a) return;
+  const items = getSelectedAnnotations();
+  if (!items.length) return;
   const { pageNum } = App.selected;
   pushHistory();
-  const copy = structuredClone(a);
-  copy.id = genId();
   const off = 14 / App.scale;
-  switch (copy.type) {
-    case 'pen': case 'highlighter': copy.points = copy.points.map((p) => ({ x: p.x + off, y: p.y + off })); break;
-    case 'text': case 'image': case 'whiteboard':
-      copy.x += off; copy.y += off;
-      // A duplicate is a new, independent piece of text — it shouldn't drag along the original's
-      // "this patches over real PDF text" whiteout, or it'd leave that patch behind, unmoved.
-      if (copy.type === 'text') { delete copy.coverRect; delete copy.coverColor; delete copy.eraseImage; delete copy.replacesAnnotId; }
-      break;
-    case 'curve':
-      copy.x1 += off; copy.y1 += off; copy.x2 += off; copy.y2 += off; copy.cx += off; copy.cy += off; break;
-    default: copy.x1 += off; copy.y1 += off; copy.x2 += off; copy.y2 += off;
+  const newIds = [];
+  for (const a of items) {
+    const copy = structuredClone(a);
+    copy.id = genId();
+    switch (copy.type) {
+      case 'pen': case 'highlighter': copy.points = copy.points.map((p) => ({ x: p.x + off, y: p.y + off })); break;
+      case 'text': case 'image': case 'whiteboard':
+        copy.x += off; copy.y += off;
+        if (copy.type === 'text') { delete copy.coverRect; delete copy.coverColor; delete copy.eraseImage; delete copy.replacesAnnotId; }
+        break;
+      case 'curve':
+        copy.x1 += off; copy.y1 += off; copy.x2 += off; copy.y2 += off; copy.cx += off; copy.cy += off; break;
+      default: copy.x1 += off; copy.y1 += off; copy.x2 += off; copy.y2 += off;
+    }
+    App.pageAnnotations[pageNum].push(copy);
+    newIds.push(copy.id);
   }
-  App.pageAnnotations[pageNum].push(copy);
-  setSelected({ pageNum, id: copy.id });
+  setSelected({ pageNum, id: newIds[0], ids: newIds });
   requestRedraw(pageNum);
   scheduleAutosave();
 }
@@ -2332,10 +2413,12 @@ function reorderSelectedAnnotation(toFront) {
   scheduleAutosave();
 }
 function nudgeSelected(dx, dy) {
-  const a = getSelectedAnnotation();
-  if (!a) return;
+  const items = getSelectedAnnotations();
+  if (!items.length) return;
   pushHistory();
-  applyTranslatedGeometry(a, structuredClone(a), dx, dy);
+  for (const a of items) {
+    applyTranslatedGeometry(a, structuredClone(a), dx, dy);
+  }
   requestRedraw(App.selected.pageNum);
   scheduleAutosave();
 }
@@ -2346,23 +2429,26 @@ function handleSelectPointerDown(pageNum, pos) {
   const sel = getSelectionGeometry(pageNum);
   if (sel) {
     if (dist(pos, { x: sel.badge.cx, y: sel.badge.cy }) <= sel.badge.r + 6) { deleteSelectedAnnotation(); return false; }
-    for (const h of sel.handles) {
-      if (dist(pos, h) <= 13) {
-        App.selDrag = { mode: 'resize-' + h.id, start: toPdfSpace(pos), orig: structuredClone(sel.a), moved: false };
-        return true;
+    if (!sel.isMulti) {
+      for (const h of sel.handles) {
+        if (dist(pos, h) <= 13) {
+          App.selDrag = { mode: 'resize-' + h.id, start: toPdfSpace(pos), orig: structuredClone(sel.a), moved: false };
+          return true;
+        }
       }
     }
     if (pos.x >= sel.rect.x1 - 6 && pos.x <= sel.rect.x2 + 6 && pos.y >= sel.rect.y1 - 6 && pos.y <= sel.rect.y2 + 6) {
-      if (sel.a.type === 'text') {
+      if (!sel.isMulti && sel.a.type === 'text') {
         const now = Date.now();
         if (lastTap.id === sel.a.id && now - lastTap.t < 380) {   // double-click / double-tap on already-selected text
           lastTap = { id: null, t: 0 };
           openTextEditor(pageNum, null, sel.a);
-          return false;
+          App.selDrag = { mode: 'none', start: toPdfSpace(pos), orig: structuredClone(sel.a), moved: false };
+          return true;
         }
         lastTap = { id: sel.a.id, t: now };
       }
-      if (sel.a.type === 'whiteboard') {
+      if (!sel.isMulti && sel.a.type === 'whiteboard') {
         const now = Date.now();
         if (lastTap.id === sel.a.id && now - lastTap.t < 380) {   // double-click on placed whiteboard -> open editor!
           lastTap = { id: null, t: 0 };
@@ -2371,7 +2457,11 @@ function handleSelectPointerDown(pageNum, pos) {
         }
         lastTap = { id: sel.a.id, t: now };
       }
-      App.selDrag = { mode: 'move', start: toPdfSpace(pos), orig: structuredClone(sel.a), moved: false };
+      if (sel.isMulti) {
+        App.selDrag = { mode: 'move-multi', start: toPdfSpace(pos), origs: sel.items.map(it => ({ a: it, orig: structuredClone(it) })), moved: false };
+      } else {
+        App.selDrag = { mode: 'move', start: toPdfSpace(pos), orig: structuredClone(sel.a), moved: false };
+      }
       return true;
     }
   }
@@ -2381,13 +2471,13 @@ function handleSelectPointerDown(pageNum, pos) {
     if (!hitTestAnnotation(list[i], p, App.scale)) continue;
     const a = list[i];
     const now = Date.now();
-    if (a.type === 'text' && lastTap.id === a.id && now - lastTap.t < 380) {   // double-click / double-tap → edit
+    if (a.type === 'text' && lastTap.id === a.id && now - lastTap.t < 380) {
       lastTap = { id: null, t: 0 };
       setSelected({ pageNum, id: a.id });
       openTextEditor(pageNum, null, a);
       return false;
     }
-    if (a.type === 'whiteboard' && lastTap.id === a.id && now - lastTap.t < 380) {   // double-click whiteboard -> open editor!
+    if (a.type === 'whiteboard' && lastTap.id === a.id && now - lastTap.t < 380) {
       lastTap = { id: null, t: 0 };
       setSelected({ pageNum, id: a.id });
       switchToWhiteboardTab(a.whiteboardId);
@@ -2412,7 +2502,12 @@ function handleSelectPointerMove(pageNum, pos) {
     pushHistory();
     d.moved = true;
   }
-  if (d.mode === 'move') {
+  if (d.mode === 'move-multi') {
+    const dx = p.x - d.start.x, dy = p.y - d.start.y;
+    for (const item of d.origs) {
+      applyTranslatedGeometry(item.a, item.orig, dx, dy);
+    }
+  } else if (d.mode === 'move') {
     applyTranslatedGeometry(a, d.orig, p.x - d.start.x, p.y - d.start.y);
   } else if (d.mode === 'resize-corner') {   // image only, aspect-locked
     a.width = Math.max(16, p.x - a.x);
@@ -2426,8 +2521,12 @@ function finishSelectDrag(pageNum) {
   const d = App.selDrag;
   App.selDrag = null;
   if (!d || !d.moved) return;
-  const a = getSelectedAnnotation();
-  if (a) normalizeBox(a);
+  if (d.mode === 'move-multi') {
+    for (const item of d.origs) normalizeBox(item.a);
+  } else {
+    const a = getSelectedAnnotation();
+    if (a) normalizeBox(a);
+  }
   requestRedraw(pageNum);
   scheduleAutosave();
 }
@@ -2508,6 +2607,7 @@ function redrawPageAnnotations(n) {
   }
   const g = App.gesture;
   if (g && g.kind === 'draw' && g.pageNum === n) drawAnnotation(ctx, g.shape, App.scale, n);
+  if (g && g.kind === 'marquee' && g.pageNum === n) drawMarqueeBox(ctx, g.startDoc, g.currentDoc, App.scale);
   if (App.hover && App.hover.pageNum === n) {
     const h = findAnnotation(n, App.hover.id);
     if (h) drawHoverOutline(ctx, h);
@@ -2826,7 +2926,7 @@ function syncToolAttr() { document.body.dataset.tool = effectiveTool(); }
 // Drawing tools (pen/highlighter/shapes) double as a selection tool for anything already on the
 // page: click an existing mark and you get it selected/movable without a trip to Select first.
 // Text, Comment, Eraser and Hand keep their own dedicated click behaviour, so they're excluded.
-function toolSupportsSelect(tool) { return tool === 'select' || tool === 'pen' || tool === 'highlighter' || SHAPE_TOOLS.includes(tool); }
+function toolSupportsSelect(tool) { return tool === 'select' || tool === 'pen' || tool === 'highlighter' || tool === 'text' || SHAPE_TOOLS.includes(tool); }
 function getPos(canvas, e) { const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
 
 // ---- pixel eyedropper --------------------------------------------------
@@ -2922,7 +3022,12 @@ function onPointerDown(e) {
     document.body.classList.add('panning');
     begin('pan', { sx: e.clientX, sy: e.clientY, sl: viewportEl.scrollLeft, st: viewportEl.scrollTop });
   } else if (tool === 'select') {
-    if (handleSelectPointerDown(pageNum, pos)) begin('select');
+    if (handleSelectPointerDown(pageNum, pos)) {
+      begin('select');
+    } else {
+      const p = toPdfSpace(pos);
+      begin('marquee', { pageNum, startPos: pos, currentPos: pos, startDoc: p, currentDoc: p });
+    }
   } else if (tool === 'pen' || tool === 'highlighter') {
     if (handleSelectPointerDown(pageNum, pos)) { begin('select'); e.preventDefault(); return; }
     begin('draw', {
@@ -2940,15 +3045,44 @@ function onPointerDown(e) {
     begin('draw', { shape });
   } else if (tool === 'text') {
     const p = toPdfSpace(pos);
+    // 1. If clicking on an existing text annotation on this page, immediately open it for text selection/editing
     const list = App.pageAnnotations[pageNum] || [];
+    let hitAnnot = null;
     for (let i = list.length - 1; i >= 0; i--) {
-      if (list[i].type === 'text' && hitTestAnnotation(list[i], p, App.scale)) { openTextEditor(pageNum, null, list[i]); return; }
+      if (list[i].type === 'text' && hitTestAnnotation(list[i], p, App.scale)) {
+        hitAnnot = list[i];
+        break;
+      }
     }
-    // A box is currently open — this click's job is just to close it (same as Escape), not also
-    // plant a brand new box at the click point. A second click, with nothing left open, is what
-    // actually creates one — so a stray click-away never costs you an accidental empty text box,
-    // and undo history stays exactly where you'd expect it right after.
-    if (activeTextEditor) { closeTextEditor(true); viewportEl.focus({ preventScroll: true }); return; }
+    if (hitAnnot) {
+      setSelected({ pageNum, id: hitAnnot.id });
+      openTextEditor(pageNum, null, hitAnnot);
+      e.preventDefault();
+      return;
+    }
+
+    // 2. If clicking on a sensed text block from the PDF, open it in place
+    const hitSense = senseHitTest(pageNum, p);
+    if (hitSense && hitSense.kind === 'block') {
+      openTextEditor(pageNum, null, null, hitSense.block);
+      e.preventDefault();
+      return;
+    }
+
+    // 3. Google Slides behavior: clicking away commits/closes and deselects; user must click again to place a new box
+    if (activeTextEditor) {
+      closeTextEditor(true);
+      if (App.selected) setSelected(null);
+      e.preventDefault();
+      return;
+    }
+    if (App.selected) {
+      setSelected(null);
+      e.preventDefault();
+      return;
+    }
+
+    // 4. Clicking empty canvas: create a new text box
     openTextEditor(pageNum, p, null);
   } else if (tool === 'sense') {
     handleSenseClick(pageNum, pos);
@@ -2971,6 +3105,10 @@ function onPointerMove(e) {
     viewportEl.scrollTop = g.st - (e.clientY - g.sy);
   } else if (g.kind === 'select') {
     handleSelectPointerMove(g.pageNum, pos);
+  } else if (g.kind === 'marquee') {
+    g.currentPos = pos;
+    g.currentDoc = toPdfSpace(pos);
+    requestRedraw(g.pageNum);
   } else if (g.kind === 'erase') {
     eraseAt(g.pageNum, pos, g);
   } else if (g.kind === 'draw') {
@@ -3001,6 +3139,27 @@ function onPointerUp(e) {
   document.body.classList.remove('panning');
   if (g.kind === 'select') {
     finishSelectDrag(g.pageNum);
+  } else if (g.kind === 'marquee') {
+    const s = g.startDoc, c = g.currentDoc;
+    const distPx = Math.hypot(c.x - s.x, c.y - s.y) * App.scale;
+    if (distPx >= 3) {
+      const mBox = {
+        x1: Math.min(s.x, c.x), y1: Math.min(s.y, c.y),
+        x2: Math.max(s.x, c.x), y2: Math.max(s.y, c.y)
+      };
+      const list = App.pageAnnotations[g.pageNum] || [];
+      const hits = list.filter((a) => rectsIntersect(getAnnotationBBox(a), mBox));
+      if (hits.length > 1) {
+        setSelected({ pageNum: g.pageNum, id: hits[0].id, ids: hits.map((h) => h.id) });
+      } else if (hits.length === 1) {
+        setSelected({ pageNum: g.pageNum, id: hits[0].id });
+      } else {
+        setSelected(null);
+      }
+    } else {
+      setSelected(null);
+    }
+    requestRedraw(g.pageNum);
   } else if (g.kind === 'draw') {
     const s = g.shape;
     const trivial = (s.type === 'pen' || s.type === 'highlighter') ? s.points.length < 2 : (s.x1 === s.x2 && s.y1 === s.y2);
@@ -3373,7 +3532,7 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
   // and so nothing changes visually the instant you commit.
   let coverEl = null, sensedErase = null;
   if (sensedBlock) {
-    sensedErase = buildEraseImage(pageNum, sensedBlock.bbox);
+    sensedErase = buildEraseImage(pageNum, sensedBlock.bbox, sensedBlock.sampleBBoxes || sensedBlock.lines);
     coverEl = document.createElement('div');
     coverEl.style.position = 'absolute';
     coverEl.style.zIndex = '29';
@@ -3503,6 +3662,7 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
           coverRect: sensedErase
             ? { x1: sensedErase.x1, y1: sensedErase.y1, x2: sensedErase.x2, y2: sensedErase.y2 }
             : { ...sensedBlock.bbox },
+          coverColor: (sensedBlock && sensedBlock.bgColor) || '#ffffff',
           ...(sensedErase ? { eraseImage: sensedErase.dataUrl } : {}),
           // Text that came from an annotation (a Kami/Acrobat typed answer) sits *above* the page content,
           // so the erase patch alone can't hide it in the saved PDF — the export removes that very
@@ -3605,15 +3765,14 @@ function openTextEditor(pageNum, pdfPos, existing, sensedBlock) {
     }
   });
   editorEl.addEventListener('blur', (e) => {
-    // Interacting with a format control (dragging the size slider, opening the native colour
-    // picker) or the armed eyedropper steals focus to do its job — that's not the person leaving
-    // the box, so keep the editor mounted; the control hands focus back (`refocus`) when it's done.
-    // relatedTarget alone isn't reliable (Safari/Firefox often report null for these), so a
-    // pointerdown on the control is tracked too.
     if (done) return;
     if (formatControlHeld || App.sampling) return;
     if (e.relatedTarget && isFormatControlEl(e.relatedTarget)) return;
-    api.finish(true);
+    // Defer finish to next tick so any in-progress click on target UI buttons (toolbar, tabs,
+    // export, buttons, swatches) finishes successfully on the FIRST click!
+    setTimeout(() => {
+      if (!done) api.finish(true);
+    }, 0);
   });
   refreshControls();
 }
@@ -3700,19 +3859,52 @@ function sampleRegionColors(pageNum, bboxDoc) {
   const total = w * h, stride = Math.max(1, Math.floor(total / 6000));
   for (let i = 0; i < total; i += stride) {
     const p = i * 4;
-    if (data[p + 3] < 200) continue;
-    const key = (data[p] >> 3) + ',' + (data[p + 1] >> 3) + ',' + (data[p + 2] >> 3);
+    if (data[p + 3] < 180) continue;
+    const r = data[p], g = data[p + 1], b = data[p + 2];
+    const key = (r >> 3) + ',' + (g >> 3) + ',' + (b >> 3);
     counts.set(key, (counts.get(key) || 0) + 1);
   }
   if (!counts.size) return null;
   const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
-  const toHex = (key) => '#' + key.split(',').map((v) => clamp((+v << 3) | 4, 0, 255).toString(16).padStart(2, '0')).join('');
-  const bgHex = toHex(sorted[0][0]);
-  const bgRgb = sorted[0][0].split(',').map((v) => (+v) << 3);
+  const toRgb = (key) => key.split(',').map((v) => clamp((+v << 3) | 4, 0, 255));
+  const toHex = (rgb) => '#' + rgb.map((v) => v.toString(16).padStart(2, '0')).join('');
+  const lum = (rgb) => 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+
+  let bgRgb = toRgb(sorted[0][0]);
+  const bgLum = lum(bgRgb);
+  if (bgRgb[0] > 240 && bgRgb[1] > 240 && bgRgb[2] > 240) bgRgb = [255, 255, 255];
+  const bgHex = toHex(bgRgb);
+
+  const isLightBg = bgLum >= 128;
+  let bestInkRgb = null;
+  let maxContrastScore = 0;
+
+  for (const [key, count] of sorted) {
+    const c = toRgb(key);
+    const dLum = isLightBg ? (bgLum - lum(c)) : (lum(c) - bgLum);
+    const colorDist = Math.hypot(c[0] - bgRgb[0], c[1] - bgRgb[1], c[2] - bgRgb[2]);
+    if (dLum > 32 || colorDist > 55) {
+      const score = (isLightBg ? (255 - lum(c)) : lum(c)) + Math.min(count * 2, 60);
+      if (score > maxContrastScore) {
+        maxContrastScore = score;
+        bestInkRgb = c;
+      }
+    }
+  }
+
   let inkHex = null;
-  for (const [key] of sorted) {
-    const c = key.split(',').map((v) => (+v) << 3);
-    if (Math.hypot(c[0] - bgRgb[0], c[1] - bgRgb[1], c[2] - bgRgb[2]) > 45) { inkHex = toHex(key); break; }
+  if (bestInkRgb) {
+    const inkLum = lum(bestInkRgb);
+    const spread = Math.max(bestInkRgb[0], bestInkRgb[1], bestInkRgb[2]) - Math.min(bestInkRgb[0], bestInkRgb[1], bestInkRgb[2]);
+    if (isLightBg && inkLum < 65 && spread < 25) {
+      inkHex = '#111827';
+    } else if (!isLightBg && inkLum > 200 && spread < 25) {
+      inkHex = '#ffffff';
+    } else {
+      inkHex = toHex(bestInkRgb);
+    }
+  } else {
+    inkHex = isLightBg ? '#111827' : '#ffffff';
   }
   return { bg: bgHex, ink: inkHex };
 }
@@ -3727,7 +3919,7 @@ function sampleRegionColors(pageNum, bboxDoc) {
 // units, the exact rect the returned image covers) or null if the page isn't currently rendered or
 // no ink was found to erase — callers fall back to leaving the original glyphs alone rather than
 // guessing a fill colour.
-function buildEraseImage(pageNum, bboxDoc) {
+function buildEraseImage(pageNum, bboxDoc, lineBBoxes) {
   const st = App.pageState[pageNum];
   const canvas = st && st.pdfCanvas;
   if (!canvas) return null;
@@ -3744,8 +3936,30 @@ function buildEraseImage(pageNum, bboxDoc) {
   const data = src.data;
   const n = w * h;
 
-  // Pass 1 — the same coarse colour vote sampleRegionColors uses, just to find a starting ink /
-  // background reference colour for classifying individual pixels below.
+  // Build line envelope rects in canvas space to protect non-text artwork (diagrams, photos)
+  const lineRects = [];
+  if (Array.isArray(lineBBoxes) && lineBBoxes.length) {
+    const padX = Math.ceil(4 * s), padY = Math.ceil(3 * s);
+    for (const lb of lineBBoxes) {
+      const lx1 = Math.max(0, Math.floor(lb.x1 * s) - x1 - padX);
+      const ly1 = Math.max(0, Math.floor(lb.y1 * s) - y1 - padY);
+      const lx2 = Math.min(w, Math.ceil(lb.x2 * s) - x1 + padX);
+      const ly2 = Math.min(h, Math.ceil(lb.y2 * s) - y1 + padY);
+      if (lx2 > lx1 && ly2 > ly1) {
+        lineRects.push({ x1: lx1, y1: ly1, x2: lx2, y2: ly2 });
+      }
+    }
+  }
+  const inLineEnvelopes = (px, py) => {
+    if (!lineRects.length) return true;
+    for (let k = 0; k < lineRects.length; k++) {
+      const r = lineRects[k];
+      if (px >= r.x1 && px <= r.x2 && py >= r.y1 && py <= r.y2) return true;
+    }
+    return false;
+  };
+
+  // Pass 1 — coarse colour vote to find background and ink reference colours
   const counts = new Map();
   const stride = Math.max(1, Math.floor(n / 8000));
   for (let i = 0; i < n; i += stride) {
@@ -3761,19 +3975,24 @@ function buildEraseImage(pageNum, bboxDoc) {
   let inkRgb = null;
   for (const [key] of sorted) {
     const c = rgbOf(key);
-    if (Math.hypot(c[0] - bgRgb[0], c[1] - bgRgb[1], c[2] - bgRgb[2]) > 45) { inkRgb = c; break; }
+    if (Math.hypot(c[0] - bgRgb[0], c[1] - bgRgb[1], c[2] - bgRgb[2]) > 40) { inkRgb = c; break; }
   }
-  if (!inkRgb) return null;   // nothing ink-coloured in this region — no glyphs to erase
+  if (!inkRgb) {
+    const bgLum = bgRgb[0] * 0.299 + bgRgb[1] * 0.587 + bgRgb[2] * 0.114;
+    inkRgb = bgLum > 128 ? [0, 0, 0] : [255, 255, 255];
+  }
 
-  // Pass 2 — classify every pixel: closer to the ink reference than to the background one becomes
-  // part of the mask to be erased. The 1.15 bias leans toward calling a borderline (antialiased)
-  // pixel ink rather than background, so stroke edges get cleaned up too, not just their centres.
+  // Pass 2 — classify ink pixels inside text line envelopes
   const mask = new Uint8Array(n);
-  for (let i = 0; i < n; i++) {
-    const p = i * 4;
-    const dInk = Math.hypot(data[p] - inkRgb[0], data[p + 1] - inkRgb[1], data[p + 2] - inkRgb[2]);
-    const dBg = Math.hypot(data[p] - bgRgb[0], data[p + 1] - bgRgb[1], data[p + 2] - bgRgb[2]);
-    if (dInk < dBg * 1.15) mask[i] = 1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (!inLineEnvelopes(x, y)) continue;
+      const p = i * 4;
+      const dInk = Math.hypot(data[p] - inkRgb[0], data[p + 1] - inkRgb[1], data[p + 2] - inkRgb[2]);
+      const dBg = Math.hypot(data[p] - bgRgb[0], data[p + 1] - bgRgb[1], data[p + 2] - bgRgb[2]);
+      if (dInk < dBg * 1.35 || dBg > 30) mask[i] = 1;
+    }
   }
   // Grow the mask by one ring so a faint sliver of antialiasing right at a stroke's edge doesn't
   // survive as a thin ghost outline of the old letterforms.
@@ -3827,6 +4046,14 @@ function buildEraseImage(pageNum, bboxDoc) {
     }
     for (let i = 0; i < n; i++) if (resolved[i] === 2) resolved[i] = 1;
     if (!remaining || !changed) break;
+  }
+
+  // Fallback: any masked ink pixel still unresolved is cleanly set to background color so old text never survives
+  for (let i = 0; i < n; i++) {
+    if (grown[i] && !resolved[i]) {
+      const p = i * 4;
+      data[p] = bgRgb[0]; data[p + 1] = bgRgb[1]; data[p + 2] = bgRgb[2];
+    }
   }
 
   const patch = document.createElement('canvas');
@@ -3972,10 +4199,40 @@ async function getAnnotationTextRuns(page) {
 // Whitespace that PDFs use for layout but that can't be drawn or exported as-is (WinAnsi has no
 // tab or em space): rewritten as plain spaces, roughly matching the width it stood for.
 const SENSED_WS_SPACES = { '\t': 4, '\u2001': 4, '\u2002': 2, '\u2003': 4, '\u3000': 4 };
+const SENSED_UNICODE_LIGATURES = {
+  '\uFB00': 'ff', '\uFB01': 'fi', '\uFB02': 'fl', '\uFB03': 'ffi', '\uFB04': 'ffl',
+  '\uFB05': 'st', '\uFB06': 'st', '\u2018': "'", '\u2019': "'", '\u201C': '"',
+  '\u201D': '"', '\u2013': '-', '\u2014': '--', '\u2026': '...', '\u2022': '•',
+  '\u00A0': ' ',
+  '\u2212': '-', '\u2044': '/', '\u2215': '/', '\u00D7': '×', '\u00F7': '÷',
+  '\u00B1': '±', '\u2264': '≤', '\u2265': '≥', '\u2260': '≠', '\u2248': '≈',
+  '\u221E': '∞', '\u00B0': '°', '\u03C0': 'π', '\u03B8': 'θ', '\u03B1': 'α',
+  '\u03B2': 'β', '\u0394': 'Δ'
+};
 function normalizeSensedWhitespace(str) {
-  return str
+  let s = str
     .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
     .replace(/[\t\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, (ch) => ' '.repeat(SENSED_WS_SPACES[ch] || 1));
+  for (const [lig, rep] of Object.entries(SENSED_UNICODE_LIGATURES)) {
+    if (s.includes(lig)) s = s.split(lig).join(rep);
+  }
+  s = s.replace(/\uFFFD(?=\s*[\d\w\(])/g, '√').replace(/\uFFFD/g, '•');
+
+  // Collapse immediate duplicate math characters (e.g. \u1D462\u1D462 -> \u1D462)
+  s = s.replace(/([\u{1D400}-\u{1D7FF}\u2100-\u214F])\1+/gu, '$1');
+
+  // Normalize compatibility math characters (Planck h \u210E -> h, math italic u \u1D462 -> u, etc.)
+  s = s.normalize('NFKC');
+
+  // Collapse doubled math variable letters in short tokens/formulas (e.g. huu -> hu, huu/gg -> hu/g, 2h/gg -> 2h/g)
+  s = s.replace(/([a-zA-Z0-9√/+\-*^]|^)([ughvxyjqzw])\2(?=[/+\-*=^√\s)]|$)/gi, (match, prefix, char) => {
+    if (match.toLowerCase() === 'egg' || (prefix.toLowerCase() === 'e' && char.toLowerCase() === 'g')) {
+      return match;
+    }
+    return prefix + char;
+  });
+
+  return s;
 }
 // How wide a space is (as a fraction of the font size) in the stand-in font sensed text will be
 // re-drawn with — gap widths are converted to a space count using that, so the gap comes out the
@@ -4039,9 +4296,16 @@ function rawTextItem(page, item, viewport, style, inkProbe) {
   if (!hasText && !blank && inkProbe && !inkProbe({ x1: geo.x1, y1: geo.y1, x2: geo.x2, y2: geo.y2 })) blank = true;
   const width = Math.max(0.01, item.width || 0);
   let str;
-  if (hasText) str = normalizeSensedWhitespace(rawStr);
-  else if (blank) str = ' '.repeat(spacesForBlank(width, spaceW, normalizeSensedWhitespace(rawStr).length));
-  else str = '\u25A1';
+  if (hasText) {
+    str = normalizeSensedWhitespace(rawStr);
+  } else if (blank) {
+    str = ' '.repeat(spacesForBlank(width, spaceW, normalizeSensedWhitespace(rawStr).length));
+  } else {
+    // Unmapped character with ink: use clean bullet/dash, never an ugly missing '□' box
+    if (width <= geo.fontHeight * 0.45) str = '•';
+    else if (width <= geo.fontHeight * 0.75) str = '-';
+    else str = ' ';
+  }
   return {
     str, unmapped: !hasText && !blank, blank, spaceW,
     x1: geo.x1, y1: geo.y1, x2: geo.x2, y2: geo.y2, baseX: geo.baseX, baseY: geo.baseY,
@@ -4190,9 +4454,37 @@ function clusterTextItems(raw, pageNum, opts) {
     if (host) { host.items.push(...ln.items); lines.splice(i, 1); }
   }
 
+  // Deduplicate overlapping/shadow/faux-bold glyphs (e.g. math variables 'uu', 'gg')
+  function deduplicateLineItems(rawItems) {
+    if (rawItems.length <= 1) return rawItems;
+    const sorted = [...rawItems].sort((a, b) => (a.x1 - b.x1) || (a.y1 - b.y1));
+    const result = [];
+    for (let i = 0; i < sorted.length; i++) {
+      const cur = sorted[i];
+      if (!result.length) { result.push(cur); continue; }
+      const prev = result[result.length - 1];
+      const dx = Math.abs(cur.x1 - prev.x1);
+      const dy = Math.abs(cur.baseY - prev.baseY);
+      const fh = Math.max(cur.fontHeight || 12, prev.fontHeight || 12, 6);
+      if (dx < Math.max(1.8, fh * 0.22) && dy < Math.max(1.8, fh * 0.22)) {
+        if (cur.str === prev.str) continue;
+        if ((cur.unmapped || cur.str === '\uFFFD') && !prev.unmapped && prev.str !== '\uFFFD') continue;
+        if ((prev.unmapped || prev.str === '\uFFFD') && !cur.unmapped && cur.str !== '\uFFFD') { result[result.length - 1] = cur; continue; }
+        // Only drop a space if it is truly at the exact same location as the glyph (dx < 0.6)
+        if (dx < 0.6) {
+          if (cur.blank && !prev.blank) continue;
+          if (prev.blank && !cur.blank) { result[result.length - 1] = cur; continue; }
+        }
+        if (cur.str.trim() && cur.str.trim() === prev.str.trim()) continue;
+      }
+      result.push(cur);
+    }
+    return result;
+  }
+
   // ---- collapse each line's items into one text run + one bbox + one majority style ----
   const lineRecs = lines.map((ln) => {
-    const items = [...ln.items].sort((a, b) => (a.baseX - b.baseX) || (a.baseY - b.baseY));
+    const items = deduplicateLineItems(ln.items).sort((a, b) => (a.baseX - b.baseX) || (a.baseY - b.baseY));
     // Whitespace-only items at either end of a line are margin, not text — leaving them in would
     // drag the line's start (and the replacement text's x) into the empty space before it.
     while (items.length && items[0].blank) items.shift();
@@ -4221,7 +4513,7 @@ function clusterTextItems(raw, pageNum, opts) {
         // Measured from the last real glyph, so a wide gap becomes as many spaces as it took up —
         // minus any the PDF already wrote itself — rather than always collapsing to one.
         const gap = it.x1 - lastReal.x2;
-        const want = gap > it.fontHeight * 0.14 ? spacesForGap(gap, it.spaceW) : 0;
+        const want = gap > Math.max(it.spaceW * 0.48, it.fontHeight * 0.22) ? spacesForGap(gap, it.spaceW) : 0;
         const have = lastReal.str.match(/ *$/)[0].length + gapText.length + it.str.match(/^ */)[0].length;
         const spaces = gapText + ' '.repeat(Math.max(0, want - have));
         if (spaces) pieces.push({ text: spaces, ...both(lastSt, st) });
@@ -4261,27 +4553,44 @@ function clusterTextItems(raw, pageNum, opts) {
     for (const ln of lineRecs) { b.x1 = Math.min(b.x1, ln.x1); b.y1 = Math.min(b.y1, ln.y1); b.x2 = Math.max(b.x2, ln.x2); b.y2 = Math.max(b.y2, ln.y2); }
     blocks.push(b);
   } else {
-    let cur = null;
     for (const ln of lineRecs) {
-      if (cur && cur.angle === ln.angle) {
-        const gap = ln.baseY - cur.lastBaseY;
-        const sameSize = ln.fontHeight > 0 && cur.lastFontHeight > 0 &&
-          ln.fontHeight / cur.lastFontHeight < 1.35 && cur.lastFontHeight / ln.fontHeight < 1.35;
-        const sameStyle = ln.fontFamily === cur.lastFontFamily && ln.bold === cur.lastBold && ln.italic === cur.lastItalic;
-        if (sameSize && sameStyle && gap > 0 && gap <= cur.lastFontHeight * 2.15) {
-          cur.lines.push(ln);
-          cur.x1 = Math.min(cur.x1, ln.x1); cur.y1 = Math.min(cur.y1, ln.y1);
-          cur.x2 = Math.max(cur.x2, ln.x2); cur.y2 = Math.max(cur.y2, ln.y2);
-          cur.lastBaseY = ln.baseY; cur.lastFontHeight = ln.fontHeight;
-          continue;
-        }
+      let matchedBlock = null;
+      for (let bi = blocks.length - 1; bi >= 0 && blocks.length - bi <= 5; bi--) {
+        const b = blocks[bi];
+        if (b.angle !== ln.angle) continue;
+        const gap = ln.baseY - b.lastBaseY;
+        const sameSize = ln.fontHeight > 0 && b.lastFontHeight > 0 &&
+          ln.fontHeight / b.lastFontHeight < 1.45 && b.lastFontHeight / ln.fontHeight < 1.45;
+        const sameStyle = (ln.fontFamily === b.lastFontFamily || !ln.fontFamily || !b.lastFontFamily) &&
+          ln.bold === b.lastBold && ln.italic === b.lastItalic;
+        if (!sameSize || !sameStyle || !(gap > 0 && gap <= b.lastFontHeight * 2.2)) continue;
+
+        // Column and margin check: prevent merging lines from separate columns or beside diagrams
+        const leftDist = Math.abs(ln.x1 - b.lines[0].x1);
+        const prevDist = Math.abs(ln.x1 - b.lines[b.lines.length - 1].x1);
+        const maxMarginDelta = Math.max(28, b.lastFontHeight * 2.5);
+        if (leftDist > maxMarginDelta && prevDist > maxMarginDelta) continue;
+        if (ln.x1 > b.x2 + b.lastFontHeight * 0.5) continue;
+
+        matchedBlock = b;
+        break;
       }
-      cur = {
-        lines: [ln], x1: ln.x1, y1: ln.y1, x2: ln.x2, y2: ln.y2, angle: ln.angle,
-        lastBaseY: ln.baseY, lastFontHeight: ln.fontHeight,
-        lastFontFamily: ln.fontFamily, lastBold: ln.bold, lastItalic: ln.italic
-      };
-      blocks.push(cur);
+
+      if (matchedBlock) {
+        matchedBlock.lines.push(ln);
+        matchedBlock.x1 = Math.min(matchedBlock.x1, ln.x1);
+        matchedBlock.y1 = Math.min(matchedBlock.y1, ln.y1);
+        matchedBlock.x2 = Math.max(matchedBlock.x2, ln.x2);
+        matchedBlock.y2 = Math.max(matchedBlock.y2, ln.y2);
+        matchedBlock.lastBaseY = ln.baseY;
+        matchedBlock.lastFontHeight = ln.fontHeight;
+      } else {
+        blocks.push({
+          lines: [ln], x1: ln.x1, y1: ln.y1, x2: ln.x2, y2: ln.y2, angle: ln.angle,
+          lastBaseY: ln.baseY, lastFontHeight: ln.fontHeight,
+          lastFontFamily: ln.fontFamily, lastBold: ln.bold, lastItalic: ln.italic
+        });
+      }
     }
   }
 
@@ -4336,7 +4645,7 @@ function clusterTextItems(raw, pageNum, opts) {
       // giving the rest of the block a mismatched color or leaving a stray white patch where a
       // highlight used to be.
       sampleBBoxes: b.lines.map((l) => ({ x1: l.x1, y1: l.y1, x2: l.x2, y2: l.y2, len: l.text.length })),
-      text: textFromRuns(runs), runs, x: first.baseX, y: first.baseY,
+      text: textFromRuns(runs), runs, x: b.x1, y: first.baseY,
       fontSize, fontFamily, bold: boldS === 'true', italic: italicS === 'true', align,
       ...(lineHeight != null ? { lineHeight } : {}),
       color: '#111827', bgColor: '#ffffff'
@@ -4412,7 +4721,6 @@ async function ensureTextBlocks(n) {
       if (ink) b.color = ink;
       if (bg) b.bgColor = bg;
       if (b.runs) b.runs.forEach((r) => { r.color = b.color; });
-      delete b.sampleBBoxes;
     }
     App.pageTextBlocks[n] = blocks;
     return blocks;
@@ -4447,13 +4755,14 @@ function blocksToNewAnnotations(pageNum, blocks) {
     } else if (list.some((a) => a.type === 'text' && a.coverRect && coverRectsClose(a.coverRect, b.bbox))) {
       continue;
     }
-    const erase = buildEraseImage(pageNum, b.bbox);
+    const erase = buildEraseImage(pageNum, b.bbox, b.sampleBBoxes || b.lines);
     const ann = {
       id: genId(), type: 'text', text: b.text, x: b.x, y: b.y,
       color: b.color, fontSize: b.fontSize, fontFamily: b.fontFamily,
       bold: !!b.bold, italic: !!b.italic, underline: false, superscript: false, subscript: false,
       align: b.align || 'left', lineHeight: clampLineHeight(b.lineHeight),
       coverRect: erase ? { x1: erase.x1, y1: erase.y1, x2: erase.x2, y2: erase.y2 } : { ...b.bbox },
+      coverColor: b.bgColor || '#ffffff',
       ...(erase ? { eraseImage: erase.dataUrl } : {}),
       ...(b.annotId ? { replacesAnnotId: b.annotId } : {})
     };
@@ -4534,22 +4843,29 @@ function senseHitTest(pageNum, p) {
   const blocks = App.pageTextBlocks[pageNum];
   if (blocks) {
     for (let i = blocks.length - 1; i >= 0; i--) {
-      if (!pointInRect(p, blocks[i].bbox)) continue;
-      // A typed-answer annotation that already has an edit: re-open that edit rather than starting a
-      // second one over the same stamp (which would draw the old text twice).
-      const id = blocks[i].annotId;
+      const b = blocks[i];
+      const expandedBBox = {
+        x1: b.bbox.x1 - 6, y1: b.bbox.y1 - 6,
+        x2: b.bbox.x2 + 6, y2: b.bbox.y2 + 6
+      };
+      if (!pointInRect(p, expandedBBox)) continue;
+      const id = b.annotId;
       const done = id && list.find((a) => a.type === 'text' && a.replacesAnnotId === id);
-      return done ? { kind: 'annot', a: done } : { kind: 'block', block: blocks[i] };
+      return done ? { kind: 'annot', a: done } : { kind: 'block', block: b };
     }
   }
   return null;
 }
-function handleSenseClick(pageNum, pos) {
-  const hit = senseHitTest(pageNum, toPdfSpace(pos));
+async function handleSenseClick(pageNum, pos) {
+  const p = toPdfSpace(pos);
+  let hit = senseHitTest(pageNum, p);
+  if (!hit && !App.pageTextBlocks[pageNum]) {
+    await ensureTextBlocks(pageNum);
+    hit = senseHitTest(pageNum, p);
+  }
   if (hit && hit.kind === 'annot') { openTextEditor(pageNum, null, hit.a); return; }
   if (hit && hit.kind === 'block') { openTextEditor(pageNum, null, null, hit.block); return; }
   closeTextEditor(true);
-  if (!App.pageTextBlocks[pageNum]) ensureTextBlocks(pageNum);   // scan now so the next click can hit something
 }
 function handleSenseHover(pageNum, pos, canvas) {
   const hit = senseHitTest(pageNum, toPdfSpace(pos));
@@ -4694,6 +5010,7 @@ function updateCommentsUI() {
 function setTool(tool) {
   if (App.sampling) toggleSampling(false);
   closeTextEditor(true);
+  if (typeof closeWbTextEditor === 'function') closeWbTextEditor(true);
   App.activeTool = tool;
   syncToolAttr();
   document.querySelectorAll('.tool-btn[data-tool]').forEach((b) => {
@@ -4705,7 +5022,12 @@ function setTool(tool) {
   // active tool is one of the shapes tucked inside its popover — otherwise picking, say, a star
   // and closing the popover leaves no toolbar button looking selected.
   btnMoreShapes.classList.toggle('active', shapesMenu.contains(document.querySelector(`.tool-btn[data-tool="${tool}"]`)));
-  if (tool !== 'select' && App.selected) setSelected(null); else refreshControls();
+  if (tool !== 'select') {
+    if (App.selected) setSelected(null);
+    if (typeof WbApp !== 'undefined' && (WbApp.selected || (WbApp.selectedIds && WbApp.selectedIds.size))) setWbSelected(null);
+  }
+  refreshControls();
+  if (App.activeTab === 'whiteboard' && typeof wbRedraw === 'function') wbRedraw();
   if (!toolSupportsSelect(tool) && App.hover) { requestRedraw(App.hover.pageNum); App.hover = null; }
   if (tool !== 'sense' && App.senseHover) { requestRedraw(App.senseHover.pageNum); App.senseHover = null; }
   if (tool === 'sense' && App.pdfDoc) {
@@ -5251,6 +5573,7 @@ const KEYBIND_ACTIONS = [
   { id: 'sendBack', label: 'Send selected item to back', default: { key: '[', mod: true, shift: false } },
   { id: 'undo', label: 'Undo', default: { key: 'z', mod: true, shift: false } },
   { id: 'redo', label: 'Redo', default: { key: 'z', mod: true, shift: true } },
+  { id: 'selectAll', label: 'Select all items', default: { key: 'a', mod: true, shift: false } },
   { id: 'exportPdf', label: 'Export annotated PDF', default: { key: 's', mod: true, shift: false } },
   { id: 'zoomIn', label: 'Zoom in', default: { key: '=', mod: false, shift: false } },
   { id: 'zoomOut', label: 'Zoom out', default: { key: '-', mod: false, shift: false } },
@@ -5275,42 +5598,50 @@ const KEYBIND_HANDLERS = {
   eyedrop: () => toggleSampling(),
   deleteSelected: () => {
     if (App.activeTab === 'whiteboard' && typeof WbApp !== 'undefined') {
-      if (WbApp.selected) {
-        const wb = WhiteboardsStore.getActive();
-        if (wb) {
-          WbApp.pushHistory();
-          wb.annotations = wb.annotations.filter(x => x.id !== WbApp.selected);
-          WbApp.selected = null;
-          wbRedraw();
-          wbSaveAndSync();
-        }
-      }
+      const wb = WhiteboardsStore.getActive();
+      if (!wb) return;
+      const ids = WbApp.selectedIds && WbApp.selectedIds.size ? Array.from(WbApp.selectedIds) : (WbApp.selected ? [WbApp.selected] : []);
+      if (!ids.length) return;
+      WbApp.pushHistory();
+      const idSet = new Set(ids);
+      wb.annotations = wb.annotations.filter(x => !idSet.has(x.id));
+      WbApp.selected = null;
+      if (WbApp.selectedIds) WbApp.selectedIds.clear();
+      wbRedraw();
+      refreshControls();
+      wbSaveAndSync();
     } else {
       if (App.selected) deleteSelectedAnnotation();
     }
   },
   duplicate: () => {
     if (App.activeTab === 'whiteboard' && typeof WbApp !== 'undefined') {
-      if (WbApp.selected) {
-        const wb = WhiteboardsStore.getActive();
-        const a = wb && wb.annotations.find(x => x.id === WbApp.selected);
-        if (a) {
-          WbApp.pushHistory();
-          const copy = structuredClone(a);
-          copy.id = genId();
-          const off = 14 / WbApp.scale;
-          switch (copy.type) {
-            case 'pen': case 'highlighter': copy.points = copy.points.map(p => ({ x: p.x + off, y: p.y + off })); break;
-            case 'text': case 'image': copy.x += off; copy.y += off; break;
-            case 'curve': copy.x1 += off; copy.y1 += off; copy.x2 += off; copy.y2 += off; copy.cx += off; copy.cy += off; break;
-            default: copy.x1 += off; copy.y1 += off; copy.x2 += off; copy.y2 += off;
-          }
-          wb.annotations.push(copy);
-          WbApp.selected = copy.id;
-          wbRedraw();
-          wbSaveAndSync();
+      const wb = WhiteboardsStore.getActive();
+      if (!wb) return;
+      const ids = WbApp.selectedIds && WbApp.selectedIds.size ? Array.from(WbApp.selectedIds) : (WbApp.selected ? [WbApp.selected] : []);
+      if (!ids.length) return;
+      const items = wb.annotations.filter(x => ids.includes(x.id));
+      if (!items.length) return;
+      WbApp.pushHistory();
+      const off = 14 / WbApp.scale;
+      const newIds = [];
+      for (const a of items) {
+        const copy = structuredClone(a);
+        copy.id = genId();
+        switch (copy.type) {
+          case 'pen': case 'highlighter': copy.points = copy.points.map(p => ({ x: p.x + off, y: p.y + off })); break;
+          case 'text': case 'image': copy.x += off; copy.y += off; break;
+          case 'curve': copy.x1 += off; copy.y1 += off; copy.x2 += off; copy.y2 += off; copy.cx += off; copy.cy += off; break;
+          default: copy.x1 += off; copy.y1 += off; copy.x2 += off; copy.y2 += off;
         }
+        wb.annotations.push(copy);
+        newIds.push(copy.id);
       }
+      WbApp.selected = newIds[0];
+      WbApp.selectedIds = new Set(newIds);
+      wbRedraw();
+      refreshControls();
+      wbSaveAndSync();
     } else {
       if (App.selected) duplicateSelectedAnnotation();
     }
@@ -5353,12 +5684,43 @@ const KEYBIND_HANDLERS = {
       if (App.selected) reorderSelectedAnnotation(false);
     }
   },
-  undo: () => undo(),
-  redo: () => redo(),
+  undo: () => {
+    if (App.activeTab === 'whiteboard' && typeof WbApp !== 'undefined') WbApp.undo();
+    else undo();
+  },
+  redo: () => {
+    if (App.activeTab === 'whiteboard' && typeof WbApp !== 'undefined') WbApp.redo();
+    else redo();
+  },
+  selectAll: () => {
+    if (App.activeTab === 'whiteboard' && typeof WbApp !== 'undefined') {
+      const wb = WhiteboardsStore.getActive();
+      if (wb && wb.annotations.length) {
+        WbApp.selected = wb.annotations[0].id;
+        WbApp.selectedIds = new Set(wb.annotations.map(a => a.id));
+        wbRedraw();
+        refreshControls();
+      }
+    } else {
+      const list = App.pageAnnotations[App.activePage] || [];
+      if (list.length) {
+        setSelected({ pageNum: App.activePage, id: list[0].id, ids: list.map(a => a.id) });
+      }
+    }
+  },
   exportPdf: () => exportAnnotatedPdf(),
-  zoomIn: () => stepZoom(1),
-  zoomOut: () => stepZoom(-1),
-  resetZoom: () => setScale(1.25),
+  zoomIn: () => {
+    if (App.activeTab === 'whiteboard' && typeof WbApp !== 'undefined') WbApp.setScale(WbApp.scale + 0.15);
+    else stepZoom(1);
+  },
+  zoomOut: () => {
+    if (App.activeTab === 'whiteboard' && typeof WbApp !== 'undefined') WbApp.setScale(WbApp.scale - 0.15);
+    else stepZoom(-1);
+  },
+  resetZoom: () => {
+    if (App.activeTab === 'whiteboard' && typeof fitWhiteboardToViewport === 'function') fitWhiteboardToViewport();
+    else setScale(1.25);
+  },
   toggleHelp: () => toggleHelpModal()
 };
 function runKeybindAction(id) { if (TOOL_ACTION_IDS.has(id)) setTool(id); else if (KEYBIND_HANDLERS[id]) KEYBIND_HANDLERS[id](); }
@@ -5507,7 +5869,11 @@ window.addEventListener('keydown', (e) => {
     const b = App.keymap[a.id];
     if (b.mod && matchesBinding(key, mod, e.shiftKey, b)) { e.preventDefault(); runKeybindAction(a.id); return; }
   }
-  if (mod && key === 'y') { e.preventDefault(); redo(); return; }   // classic Windows redo, always available
+  if (mod && key === 'y') {
+    e.preventDefault();
+    if (App.activeTab === 'whiteboard') WbApp.redo(); else redo();
+    return;
+  }
   if (mod || e.altKey) return;
 
   if (e.code === 'Space' && tag !== 'BUTTON') {
@@ -5519,23 +5885,40 @@ window.addEventListener('keydown', (e) => {
     const b = App.keymap[a.id];
     if (!b.mod && matchesBinding(key, mod, e.shiftKey, b)) { e.preventDefault(); runKeybindAction(a.id); return; }
   }
-  if (key === 'backspace' && App.selected) { e.preventDefault(); deleteSelectedAnnotation(); return; }
-  if (key === 'enter' && App.selected) {
-    const a = getSelectedAnnotation();
-    if (a && a.type === 'text') { e.preventDefault(); openTextEditor(App.selected.pageNum, null, a); return; }
-    if (a && a.type === 'whiteboard') { e.preventDefault(); switchToWhiteboardTab(a.whiteboardId); return; }
+  if (key === 'backspace') {
+    if (App.activeTab === 'whiteboard') {
+      if (WbApp.selected || (WbApp.selectedIds && WbApp.selectedIds.size)) { e.preventDefault(); KEYBIND_HANDLERS.deleteSelected(); return; }
+    } else {
+      if (App.selected) { e.preventDefault(); deleteSelectedAnnotation(); return; }
+    }
   }
-  if ((App.selected || (App.activeTab === 'whiteboard' && WbApp.selected)) && key.startsWith('arrow')) {
+  if (key === 'enter') {
+    if (App.activeTab === 'whiteboard') {
+      if (WbApp.selected) {
+        const wb = WhiteboardsStore.getActive();
+        const a = wb && wb.annotations.find(x => x.id === WbApp.selected);
+        if (a && a.type === 'text') { e.preventDefault(); openWbTextEditor(null, a); return; }
+      }
+    } else if (App.selected) {
+      const a = getSelectedAnnotation();
+      if (a && a.type === 'text') { e.preventDefault(); openTextEditor(App.selected.pageNum, null, a); return; }
+      if (a && a.type === 'whiteboard') { e.preventDefault(); switchToWhiteboardTab(a.whiteboardId); return; }
+    }
+  }
+  if ((App.selected || (App.activeTab === 'whiteboard' && (WbApp.selected || (WbApp.selectedIds && WbApp.selectedIds.size)))) && key.startsWith('arrow')) {
     e.preventDefault();
     const step = e.shiftKey ? 10 : 1;
     const dx = key === 'arrowleft' ? -step : key === 'arrowright' ? step : 0;
     const dy = key === 'arrowup' ? -step : key === 'arrowdown' ? step : 0;
     if (App.activeTab === 'whiteboard') {
       const wb = WhiteboardsStore.getActive();
-      const a = wb && wb.annotations.find(x => x.id === WbApp.selected);
-      if (a) {
+      const ids = WbApp.selectedIds && WbApp.selectedIds.size ? Array.from(WbApp.selectedIds) : (WbApp.selected ? [WbApp.selected] : []);
+      if (wb && ids.length) {
         WbApp.pushHistory();
-        applyTranslatedGeometry(a, structuredClone(a), dx, dy);
+        ids.forEach(id => {
+          const a = wb.annotations.find(x => x.id === id);
+          if (a) applyTranslatedGeometry(a, structuredClone(a), dx, dy);
+        });
         wbRedraw();
         wbSaveAndSync();
       }
@@ -5544,8 +5927,21 @@ window.addEventListener('keydown', (e) => {
     }
     return;
   }
-  if (key === '+') { stepZoom(1); return; }
-  if (key === '_') { stepZoom(-1); return; }
+  if (key === '+' || key === '=') {
+    if (App.activeTab === 'whiteboard') WbApp.setScale(WbApp.scale + 0.15);
+    else stepZoom(1);
+    return;
+  }
+  if (key === '_' || key === '-') {
+    if (App.activeTab === 'whiteboard') WbApp.setScale(WbApp.scale - 0.15);
+    else stepZoom(-1);
+    return;
+  }
+  if (key === '0') {
+    if (App.activeTab === 'whiteboard') fitWhiteboardToViewport();
+    else setScale(1.25);
+    return;
+  }
 });
 window.addEventListener('keyup', (e) => { if (e.code === 'Space' && App.spaceHeld) { App.spaceHeld = false; syncToolAttr(); } });
 window.addEventListener('blur', () => { if (App.spaceHeld) { App.spaceHeld = false; syncToolAttr(); } });
@@ -5630,9 +6026,19 @@ viewportEl.addEventListener('scroll', closeContextMenu, { passive: true });
 // Buttons that change text style while the inline editor is focused must not steal focus —
 // stealing focus would blur (and thus commit/close) the editor before the style even applies.
 // Preventing the mousedown's default focus-shift keeps the textarea focused; the click still fires.
-function preventFocusSteal(el) { el.addEventListener('mousedown', (e) => e.preventDefault()); }
-document.querySelectorAll('#colorPalette .swatch, #textStyleControls button').forEach(preventFocusSteal);
-preventFocusSteal(btnEyedrop);   // arming the eyedropper mid-edit must not blur (and so close) the text editor
+// Global UI mousedown handler: prevents focus shift from killing in-progress button click events,
+// and ensures any open text editor is committed immediately and cleanly on the VERY FIRST CLICK.
+document.addEventListener('mousedown', (e) => {
+  const target = e.target;
+  if (!(target instanceof Element)) return;
+  if (target.closest('input, textarea, [contenteditable="true"]')) return;
+  const uiControl = target.closest('button, .tool-btn, .tab, .swatch, [role="button"], [role="menuitem"], [role="tab"]');
+  if (uiControl) {
+    if (activeTextEditor) closeTextEditor(true);
+    if (typeof closeWbTextEditor === 'function') closeWbTextEditor(true);
+    e.preventDefault();
+  }
+}, true);
 
 document.querySelectorAll('#colorPalette .swatch').forEach((btn) => btn.addEventListener('click', () => {
   App.styleEditOpen = false;
@@ -6220,6 +6626,7 @@ const WbApp = {
   minScale: 0.25,
   maxScale: 3.0,
   selected: null, // string id
+  selectedIds: new Set(),
   selDrag: null,
   hover: null,
   gesture: null,
@@ -6312,17 +6719,59 @@ function toWbCanvasSpace(p) {
   return { x: p.x * WbApp.scale, y: p.y * WbApp.scale };
 }
 
+function setWbSelected(id, ids) {
+  WbApp.selected = id || null;
+  if (ids && Array.isArray(ids)) {
+    WbApp.selectedIds = new Set(ids);
+  } else if (ids && ids instanceof Set) {
+    WbApp.selectedIds = new Set(ids);
+  } else if (id) {
+    WbApp.selectedIds = new Set([id]);
+  } else {
+    if (WbApp.selectedIds) WbApp.selectedIds.clear();
+  }
+  wbRedraw();
+  refreshControls();
+}
+function getWbSelectedAnnotations() {
+  const wb = WhiteboardsStore.getActive();
+  if (!wb) return [];
+  if (WbApp.selectedIds && WbApp.selectedIds.size > 0) {
+    return (wb.annotations || []).filter(a => WbApp.selectedIds.has(a.id));
+  }
+  if (WbApp.selected) {
+    const a = (wb.annotations || []).find(x => x.id === WbApp.selected);
+    return a ? [a] : [];
+  }
+  return [];
+}
 function getWbSelectionGeometry() {
-  if (!WbApp.selected) return null;
   const wb = WhiteboardsStore.getActive();
   if (!wb) return null;
-  const a = wb.annotations.find(x => x.id === WbApp.selected);
-  if (!a) return null;
+  const items = getWbSelectedAnnotations();
+  if (!items.length) return null;
+  const boardW = wb.width * WbApp.scale, boardH = wb.height * WbApp.scale;
+  if (items.length > 1) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const itemRects = [];
+    for (const it of items) {
+      const bb = getAnnotationBBox(it);
+      const p1 = toWbCanvasSpace({ x: bb.x1, y: bb.y1 });
+      const p2 = toWbCanvasSpace({ x: bb.x2, y: bb.y2 });
+      const ir = { x1: Math.min(p1.x, p2.x), y1: Math.min(p1.y, p2.y), x2: Math.max(p1.x, p2.x), y2: Math.max(p1.y, p2.y) };
+      itemRects.push(ir);
+      minX = Math.min(minX, ir.x1); minY = Math.min(minY, ir.y1);
+      maxX = Math.max(maxX, ir.x2); maxY = Math.max(maxY, ir.y2);
+    }
+    const rect = { x1: minX, y1: minY, x2: maxX, y2: maxY };
+    const badge = { cx: clamp(rect.x2, 12, boardW - 12), cy: clamp(rect.y1, 12, boardH - 12), r: 10 };
+    return { isMulti: true, items, itemRects, rect, badge, handles: [] };
+  }
+  const a = items[0];
   const bb = getAnnotationBBox(a);
   const p1 = toWbCanvasSpace({ x: bb.x1, y: bb.y1 });
   const p2 = toWbCanvasSpace({ x: bb.x2, y: bb.y2 });
   const rect = { x1: Math.min(p1.x, p2.x), y1: Math.min(p1.y, p2.y), x2: Math.max(p1.x, p2.x), y2: Math.max(p1.y, p2.y) };
-  const boardW = wb.width * WbApp.scale, boardH = wb.height * WbApp.scale;
   const badge = { cx: clamp(rect.x2, 12, boardW - 12), cy: clamp(rect.y1, 12, boardH - 12), r: 10 };
   let handles = [];
   if (a.type === 'curve') {
@@ -6384,6 +6833,8 @@ function wbRedraw() {
   const g = WbApp.gesture;
   if (g && g.kind === 'draw') {
     drawAnnotation(ctx, g.shape, WbApp.scale, 0);
+  } else if (g && g.kind === 'marquee') {
+    drawMarqueeBox(ctx, g.startDoc, g.currentDoc, WbApp.scale);
   }
 
   if (WbApp.hover) {
@@ -6489,6 +6940,13 @@ function openWbTextEditor(pos, existing) {
     editorEl.style.width = `${Math.max(40, maxW + 6)}px`;
   }
 
+  function toggleRunStyle(key) {
+    const cur = runs[0] ? runs[0][key] : false;
+    runs = runs.map(r => ({ ...r, [key]: !cur }));
+    renderRuns();
+    fit();
+  }
+
   renderRuns();
   fit();
   wrap.appendChild(editorEl);
@@ -6550,24 +7008,128 @@ function openWbTextEditor(pos, existing) {
     runs = [{ text: editorEl.textContent, color: App.color, fontSize: App.fontSize, fontFamily: App.fontFamily, bold: App.bold, italic: App.italic, underline: App.underline, superscript: App.superscript, subscript: App.subscript }];
     fit();
   });
+
   editorEl.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && !e.altKey) {
+      const k = e.key.toLowerCase();
+      if (matchesBinding(k, mod, e.shiftKey, App.keymap.undo)) {
+        e.preventDefault(); e.stopPropagation(); WbApp.undo(); return;
+      }
+      if (matchesBinding(k, mod, e.shiftKey, App.keymap.redo) || k === 'y') {
+        e.preventDefault(); e.stopPropagation(); WbApp.redo(); return;
+      }
+      if (!e.shiftKey) {
+        if (k === 'b') { e.preventDefault(); e.stopPropagation(); toggleRunStyle('bold'); return; }
+        if (k === 'i') { e.preventDefault(); e.stopPropagation(); toggleRunStyle('italic'); return; }
+        if (k === 'u') { e.preventDefault(); e.stopPropagation(); toggleRunStyle('underline'); return; }
+        if (e.key === '=') { e.preventDefault(); e.stopPropagation(); toggleRunStyle('subscript'); return; }
+      }
+      if (e.shiftKey && (e.key === '+' || e.key === '=')) {
+        e.preventDefault(); e.stopPropagation(); toggleRunStyle('superscript'); return;
+      }
+    }
+    if (e.key === 'Enter') {
+      if (e.shiftKey) return; // Shift+Enter allowed for new line
+      e.preventDefault(); e.stopPropagation();
       api.finish(true);
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault(); e.stopPropagation();
       api.finish(false);
+      return;
     }
   });
+
   editorEl.addEventListener('blur', () => {
     if (done) return;
-    api.finish(true);
+    setTimeout(() => {
+      if (!done) api.finish(true);
+    }, 0);
   });
 }
 
 // Whiteboard Pointer Events
+
+// Whiteboard Pointer Events
 let wbLastTap = { id: null, t: 0 };
+
+function handleWbSelectPointerDown(pos) {
+  const p = toWbSpace(pos);
+  const wb = WhiteboardsStore.getActive();
+  if (!wb) return false;
+
+  const sel = getWbSelectionGeometry();
+  if (sel) {
+    if (dist(pos, { x: sel.badge.cx, y: sel.badge.cy }) <= sel.badge.r + 6) {
+      WbApp.pushHistory();
+      const idsToDelete = sel.isMulti ? new Set(sel.items.map(x => x.id)) : new Set([sel.a.id]);
+      wb.annotations = wb.annotations.filter(x => !idsToDelete.has(x.id));
+      WbApp.selected = null;
+      if (WbApp.selectedIds) WbApp.selectedIds.clear();
+      wbRedraw();
+      wbSaveAndSync();
+      return false;
+    }
+    if (!sel.isMulti) {
+      for (const h of sel.handles) {
+        if (dist(pos, h) <= 13) {
+          WbApp.selDrag = { mode: 'resize-' + h.id, start: p, orig: structuredClone(sel.a), moved: false };
+          return true;
+        }
+      }
+    }
+    if (pos.x >= sel.rect.x1 - 6 && pos.x <= sel.rect.x2 + 6 && pos.y >= sel.rect.y1 - 6 && pos.y <= sel.rect.y2 + 6) {
+      if (!sel.isMulti && sel.a.type === 'text') {
+        const now = Date.now();
+        if (wbLastTap.id === sel.a.id && now - wbLastTap.t < 380) {
+          wbLastTap = { id: null, t: 0 };
+          openWbTextEditor(null, sel.a);
+          WbApp.selDrag = { mode: 'none', start: p, orig: structuredClone(sel.a), moved: false };
+          return true;
+        }
+        wbLastTap = { id: sel.a.id, t: now };
+      }
+      if (sel.isMulti) {
+        WbApp.selDrag = { mode: 'move-multi', start: p, origs: sel.items.map(it => ({ a: it, orig: structuredClone(it) })), moved: false };
+      } else {
+        WbApp.selDrag = { mode: 'move', start: p, orig: structuredClone(sel.a), moved: false };
+      }
+      return true;
+    }
+  }
+
+  for (let i = wb.annotations.length - 1; i >= 0; i--) {
+    const a = wb.annotations[i];
+    if (hitTestAnnotation(a, p, WbApp.scale)) {
+      const now = Date.now();
+      if (a.type === 'text' && wbLastTap.id === a.id && now - wbLastTap.t < 380) {
+        wbLastTap = { id: null, t: 0 };
+        WbApp.selected = a.id;
+        WbApp.selectedIds = new Set([a.id]);
+        openWbTextEditor(null, a);
+        return false;
+      }
+      wbLastTap = { id: a.id, t: now };
+      WbApp.selected = a.id;
+      WbApp.selectedIds = new Set([a.id]);
+      WbApp.selDrag = { mode: 'move', start: p, orig: structuredClone(a), moved: false };
+      wbRedraw();
+      refreshControls();
+      return true;
+    }
+  }
+
+  if (WbApp.selected || (WbApp.selectedIds && WbApp.selectedIds.size)) {
+    WbApp.selected = null;
+    if (WbApp.selectedIds) WbApp.selectedIds.clear();
+    wbRedraw();
+    refreshControls();
+  }
+  return false;
+}
+
 function initWhiteboardPointerEvents() {
   const canvas = $('wbCanvas');
   const wrap = $('wbBoardWrap');
@@ -6615,61 +7177,43 @@ function initWhiteboardPointerEvents() {
       document.body.classList.add('panning');
       begin('pan', { sx: e.clientX, sy: e.clientY, sl: $('wbViewport').scrollLeft, st: $('wbViewport').scrollTop });
     } else if (tool === 'select') {
-      const sel = getWbSelectionGeometry();
-      if (sel) {
-        if (dist(pos, { x: sel.badge.cx, y: sel.badge.cy }) <= sel.badge.r + 6) {
-          WbApp.pushHistory();
-          wb.annotations = wb.annotations.filter(x => x.id !== sel.a.id);
-          WbApp.selected = null;
-          wbRedraw();
-          wbSaveAndSync();
-          return;
-        }
-        for (const h of sel.handles) {
-          if (dist(pos, h) <= 13) {
-            WbApp.selDrag = { mode: 'resize-' + h.id, start: p, orig: structuredClone(sel.a), moved: false };
-            begin('select');
-            return;
-          }
-        }
-        if (pos.x >= sel.rect.x1 - 6 && pos.x <= sel.rect.x2 + 6 && pos.y >= sel.rect.y1 - 6 && pos.y <= sel.rect.y2 + 6) {
-          if (sel.a.type === 'text') {
-            const now = Date.now();
-            if (wbLastTap.id === sel.a.id && now - wbLastTap.t < 380) {
-              wbLastTap = { id: null, t: 0 };
-              openWbTextEditor(null, sel.a);
-              return;
-            }
-            wbLastTap = { id: sel.a.id, t: now };
-          }
-          WbApp.selDrag = { mode: 'move', start: p, orig: structuredClone(sel.a), moved: false };
-          begin('select');
-          return;
+      if (handleWbSelectPointerDown(pos)) {
+        begin('select');
+      } else {
+        begin('marquee', { startPos: pos, currentPos: pos, startDoc: p, currentDoc: p });
+      }
+    } else if (tool === 'text') {
+      // 1. If clicking on an existing text annotation on whiteboard, immediately open it for text selection/editing
+      const items = wb.annotations || [];
+      let hitAnnot = null;
+      for (let i = items.length - 1; i >= 0; i--) {
+        if (items[i].type === 'text' && hitTestAnnotation(items[i], p, WbApp.scale)) {
+          hitAnnot = items[i];
+          break;
         }
       }
-      for (let i = wb.annotations.length - 1; i >= 0; i--) {
-        const a = wb.annotations[i];
-        if (hitTestAnnotation(a, p, WbApp.scale)) {
-          const now = Date.now();
-          if (a.type === 'text' && wbLastTap.id === a.id && now - wbLastTap.t < 380) {
-            wbLastTap = { id: null, t: 0 };
-            WbApp.selected = a.id;
-            openWbTextEditor(null, a);
-            return;
-          }
-          wbLastTap = { id: a.id, t: now };
-          WbApp.selected = a.id;
-          WbApp.selDrag = { mode: 'move', start: p, orig: structuredClone(a), moved: false };
-          begin('select');
-          wbRedraw();
-          return;
-        }
+      if (hitAnnot) {
+        setWbSelected(hitAnnot.id);
+        openWbTextEditor(null, hitAnnot);
+        return;
       }
-      if (WbApp.selected) {
-        WbApp.selected = null;
-        wbRedraw();
+
+      // 2. Google Slides behavior on whiteboard: click away commits and deselects; click again to create
+      if (activeWbTextEditor) {
+        closeWbTextEditor(true);
+        if (WbApp.selected || (WbApp.selectedIds && WbApp.selectedIds.size)) setWbSelected(null);
+        return;
       }
+      if (WbApp.selected || (WbApp.selectedIds && WbApp.selectedIds.size)) {
+        setWbSelected(null);
+        return;
+      }
+
+      // 3. Clicking empty canvas: create a new text box
+      openWbTextEditor(p, null);
+      return;
     } else if (tool === 'pen' || tool === 'highlighter') {
+      if (handleWbSelectPointerDown(pos)) { begin('select'); return; }
       begin('draw', {
         shape: {
           id: genId(), type: tool, points: [p], color: App.color,
@@ -6678,11 +7222,10 @@ function initWhiteboardPointerEvents() {
         }
       });
     } else if (SHAPE_TOOLS.includes(tool)) {
+      if (handleWbSelectPointerDown(pos)) { begin('select'); return; }
       const shape = { id: genId(), type: tool, x1: p.x, y1: p.y, x2: p.x, y2: p.y, color: App.color, width: App.strokeWidth };
       if (tool === 'curve') { shape.cx = p.x; shape.cy = p.y; }
       begin('draw', { shape });
-    } else if (tool === 'text') {
-      openWbTextEditor(p, null);
     } else if (tool === 'eraser') {
       begin('erase', { pushed: false });
       wbEraseAt(p, WbApp.gesture);
@@ -6701,7 +7244,7 @@ function initWhiteboardPointerEvents() {
     if (!g) {
       let cursor = 'crosshair';
       const tool = effectiveTool();
-      if (tool === 'select') {
+      if (toolSupportsSelect(tool)) {
         const sel = getWbSelectionGeometry();
         cursor = 'default';
         if (sel) {
@@ -6744,7 +7287,14 @@ function initWhiteboardPointerEvents() {
         WbApp.pushHistory();
         d.moved = true;
       }
-      if (d.mode === 'move') {
+      if (d.mode === 'move-multi') {
+        const dx = p.x - d.start.x, dy = p.y - d.start.y;
+        for (const item of d.origs) {
+          applyTranslatedGeometry(item.a, item.orig, dx, dy);
+        }
+        wbRedraw();
+        return;
+      } else if (d.mode === 'move') {
         applyTranslatedGeometry(a, d.orig, p.x - d.start.x, p.y - d.start.y);
       } else if (d.mode === 'resize-corner') {
         a.width = Math.max(16, p.x - a.x);
@@ -6752,6 +7302,10 @@ function initWhiteboardPointerEvents() {
       } else if (d.mode === 'resize-p1') { a.x1 = p.x; a.y1 = p.y; }
       else if (d.mode === 'resize-p2') { a.x2 = p.x; a.y2 = p.y; }
       else if (d.mode === 'resize-p3') { a.cx = p.x; a.cy = p.y; }
+      wbRedraw();
+    } else if (g.kind === 'marquee') {
+      g.currentPos = pos;
+      g.currentDoc = p;
       wbRedraw();
     } else if (g.kind === 'erase') {
       wbEraseAt(p, g);
@@ -6782,11 +7336,41 @@ function initWhiteboardPointerEvents() {
       const d = WbApp.selDrag;
       WbApp.selDrag = null;
       if (d && d.moved) {
-        const a = wb.annotations.find(x => x.id === WbApp.selected);
-        if (a) normalizeBox(a);
+        if (d.mode === 'move-multi') {
+          for (const item of d.origs) normalizeBox(item.a);
+        } else {
+          const a = wb.annotations.find(x => x.id === WbApp.selected);
+          if (a) normalizeBox(a);
+        }
         wbRedraw();
         wbSaveAndSync();
       }
+    } else if (g.kind === 'marquee') {
+      const s = g.startDoc, c = g.currentDoc;
+      const distPx = Math.hypot(c.x - s.x, c.y - s.y) * WbApp.scale;
+      if (distPx >= 3) {
+        const mBox = {
+          x1: Math.min(s.x, c.x), y1: Math.min(s.y, c.y),
+          x2: Math.max(s.x, c.x), y2: Math.max(s.y, c.y)
+        };
+        const hits = (wb.annotations || []).filter(a => rectsIntersect(getAnnotationBBox(a), mBox));
+        if (hits.length > 1) {
+          WbApp.selected = hits[0].id;
+          WbApp.selectedIds = new Set(hits.map(h => h.id));
+        } else if (hits.length === 1) {
+          WbApp.selected = hits[0].id;
+          WbApp.selectedIds = new Set([hits[0].id]);
+        } else {
+          WbApp.selected = null;
+          WbApp.selectedIds = new Set();
+        }
+      } else {
+        WbApp.selected = null;
+        WbApp.selectedIds = new Set();
+      }
+      wbRedraw();
+      refreshControls();
+      wbSaveAndSync();
     } else if (g.kind === 'draw') {
       const s = g.shape;
       const trivial = (s.type === 'pen' || s.type === 'highlighter') ? s.points.length < 2 : (s.x1 === s.x2 && s.y1 === s.y2);
@@ -6866,6 +7450,16 @@ function switchTab(tab) {
   $('btnConvertPageText').classList.toggle('hidden', !isPdf);
   $('btnClearPage').querySelector('span').textContent = isPdf ? 'Clear Page' : 'Clear Whiteboard';
 
+  const sigBtn = $('btnOpenSignature');
+  if (sigBtn) sigBtn.classList.toggle('hidden', !isPdf);
+  const senseBtn = document.querySelector('.tool-btn[data-tool="sense"]');
+  if (senseBtn) senseBtn.classList.toggle('hidden', !isPdf);
+  const commentBtn = document.querySelector('.tool-btn[data-tool="comment"]');
+  if (commentBtn) commentBtn.classList.toggle('hidden', !isPdf);
+  if (!isPdf && (App.activeTool === 'sense' || App.activeTool === 'comment')) {
+    setTool('select');
+  }
+
   if (!isPdf) {
     fitWhiteboardToViewport();
     updateWhiteboardHeader();
@@ -6897,8 +7491,11 @@ function updateWhiteboardHeader() {
 
 function switchToWhiteboardTab(wbId) {
   if (wbId && WhiteboardsStore.get(wbId)) {
-    WhiteboardsStore.activeId = wbId;
-    WhiteboardsStore.save();
+    if (WhiteboardsStore.activeId !== wbId) {
+      WhiteboardsStore.activeId = wbId;
+      WhiteboardsStore.save();
+      WbApp.resetHistory();
+    }
   }
   switchTab('whiteboard');
 }
